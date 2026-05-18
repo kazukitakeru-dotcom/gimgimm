@@ -283,6 +283,29 @@ function renderStats() {
         `).join('')}
       </div>
     ` : ''}
+
+    <!-- ── データ引き継ぎ ── -->
+    <div class="transfer-card">
+      <div class="transfer-title">📲 機種変更・データ引き継ぎ</div>
+      <p class="transfer-desc">
+        全データ（種目・ログ・累計重量）をJSONファイルに書き出します。<br>
+        新しいiPhoneで同じアプリを開き、インポートしてください。
+      </p>
+
+      <div class="transfer-section-label">STEP 1 — 旧端末でエクスポート</div>
+      <button class="btn-export" id="btn-export">
+        <span class="transfer-btn-icon">⬆️</span>
+        データをエクスポート（ファイル保存）
+      </button>
+
+      <div class="transfer-section-label" style="margin-top:20px">STEP 2 — 新端末でインポート</div>
+      <p class="transfer-note">※ 現在のデータはすべて上書きされます</p>
+      <label class="btn-import-label" id="btn-import-label">
+        <span class="transfer-btn-icon">⬇️</span>
+        データをインポート（ファイル選択）
+        <input type="file" id="import-file-input" accept=".json" style="display:none" />
+      </label>
+    </div>
   `;
 }
 
