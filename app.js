@@ -1,0 +1,645 @@
+// ================================================================
+//  IRON LOG — PWA 筋トレ記録アプリ
+// ================================================================
+
+// ── Storage helpers ──────────────────────────────────────────────
+const DB = {
+  get(key, fallback = null) {
+    try {
+      const v = localStorage.getItem(key);
+      return v !== null ? JSON.parse(v) : fallback;
+    } catch { return fallback; }
+  },
+  set(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  }
+};
+
+// ── State ────────────────────────────────────────────────────────
+let exercises = DB.get('exercises', [
+  { id: 1, name: 'ベンチプレス', weight: 60 },
+  { id: 2, name: 'スクワット',   weight: 80 },
+  { id: 3, name: 'デッドリフト', weight: 100 },
+]);
+let logs         = DB.get('logs', []);
+let totalWeight  = DB.get('totalWeight', 0);
+let currentTab   = 'workout';
+
+// session: { [exId]: { sets: [{time}] } }
+let session = {};
+
+// ── Utility ──────────────────────────────────────────────────────
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日`;
+}
+function nowHHMM() {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+function formatSec(s) {
+  const m = String(Math.floor(s/60)).padStart(2,'0');
+  const sc = String(s%60).padStart(2,'0');
+  return `${m}:${sc}`;
+}
+function uid() { return Date.now() + Math.random(); }
+
+function saveExercises() { DB.set('exercises', exercises); }
+function saveLogs()       { DB.set('logs', logs); }
+function saveTotalWeight(){ DB.set('totalWeight', totalWeight); }
+
+// ── Toast ────────────────────────────────────────────────────────
+let toastTimer;
+function showToast(msg) {
+  let el = document.querySelector('.toast');
+  if (el) el.remove();
+  el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.remove(), 2800);
+}
+
+// ================================================================
+//  RENDER ENGINE
+// ================================================================
+function render() {
+  document.getElementById('app').innerHTML = `
+    ${renderHeader()}
+    ${renderTabBar()}
+    <div class="content" id="content">
+      ${currentTab === 'workout' ? renderWorkout()
+        : currentTab === 'log'   ? renderLog()
+        :                          renderStats()}
+    </div>
+  `;
+  bindEvents();
+}
+
+// ── Header ──────────────────────────────────────────────────────
+function renderHeader() {
+  return `
+    <header class="app-header">
+      <div>
+        <div class="app-title">IRON LOG</div>
+      </div>
+      <div class="app-date">${todayStr()}</div>
+    </header>
+  `;
+}
+
+// ── Tab bar ─────────────────────────────────────────────────────
+function renderTabBar() {
+  const tabs = [
+    ['workout', '🏋️', 'トレーニング'],
+    ['log',     '📅', 'ログ'],
+    ['stats',   '📊', '統計'],
+  ];
+  return `<nav class="tab-bar">
+    ${tabs.map(([id, icon, label]) =>
+      `<button class="tab-btn${currentTab===id?' active':''}" data-tab="${id}">
+        ${icon} ${label}
+      </button>`
+    ).join('')}
+  </nav>`;
+}
+
+// ── Workout tab ──────────────────────────────────────────────────
+function renderWorkout() {
+  return `
+    <button class="btn-add-exercise" id="btn-add-ex">＋ 種目を追加</button>
+    <div id="ex-list">
+      ${exercises.map(renderExCard).join('')}
+    </div>
+    <button class="btn-save-log" id="btn-save-log">💾 今日のログを保存</button>
+  `;
+}
+
+function renderExCard(ex) {
+  const sess = session[ex.id] || { sets: [] };
+  const setCount = sess.sets.length;
+
+  return `
+  <div class="ex-card" data-exid="${ex.id}" draggable="true">
+    <div class="ex-card-header">
+      <span class="drag-handle" data-drag="${ex.id}">⠿</span>
+      <div class="ex-info">
+        <div class="ex-name">${ex.name}</div>
+        <div class="ex-weight">${ex.weight} kg</div>
+      </div>
+      <div class="ex-card-actions">
+        <button class="btn-icon" data-edit="${ex.id}" title="編集">✏️</button>
+        <button class="btn-icon danger" data-delete="${ex.id}" title="削除">🗑</button>
+        <button class="btn-icon" data-toggle="${ex.id}" title="開閉">
+          ${sess.open ? '▲' : '▼'}
+        </button>
+      </div>
+    </div>
+
+    ${sess.open ? `
+    <div class="ex-card-body">
+
+      <!-- ① セット記録 -->
+      <div class="set-counter-section">
+        <div class="section-label">セット記録</div>
+
+        <button class="btn-set-tap" data-set-tap="${ex.id}" style="position:relative;overflow:hidden;">
+          <div class="set-count-display">${setCount}</div>
+          <div class="set-count-label">SET COMPLETED</div>
+        </button>
+
+        ${setCount > 0 ? `
+        <div class="set-history">
+          ${sess.sets.map((s, i) => `
+            <div class="set-history-row">
+              <span class="set-history-num">Set ${i+1}</span>
+              <span class="set-history-time">${s.time}</span>
+              ${i === setCount-1 ? `<button class="btn-undo-single" data-undo="${ex.id}">↩ 取消</button>` : ''}
+            </div>
+          `).join('')}
+        </div>
+        ` : ''}
+      </div>
+
+      <!-- ② レストタイマー (補助) -->
+      <div class="rest-timer-section">
+        <div class="section-label">レストタイマー（補助）</div>
+        ${renderTimer(ex.id, sess)}
+      </div>
+
+    </div>
+    ` : ''}
+  </div>
+  `;
+}
+
+// ── Timer renderer ───────────────────────────────────────────────
+function renderTimer(exId, sess) {
+  const t = sess.timer || { mode: 'countdown', sec: 90, running: false, cur: 90, preset: 90 };
+  const displaySec = t.running ? t.cur : (t.mode==='countdown' ? t.preset : 0);
+  const cls = !t.running ? 'idle'
+    : t.mode==='countdown'
+      ? (t.cur <= 10 ? 'warning' : 'running-countdown')
+      : 'running-stopwatch';
+
+  const PRESETS = [60, 90, 120, 180];
+
+  return `
+    <div class="timer-mode-toggle">
+      <button class="btn-mode${t.mode==='countdown'?' active-countdown':''}" data-timer-mode="${exId}" data-mode="countdown">
+        ⏳ カウントダウン
+      </button>
+      <button class="btn-mode${t.mode==='stopwatch'?' active-stopwatch':''}" data-timer-mode="${exId}" data-mode="stopwatch">
+        ⏱ ストップウォッチ
+      </button>
+    </div>
+
+    ${t.mode==='countdown' ? `
+    <div class="timer-presets">
+      ${PRESETS.map(p=>`
+        <button class="btn-preset${t.preset===p?' selected':''}" data-timer-preset="${exId}" data-sec="${p}">
+          ${p}秒
+        </button>
+      `).join('')}
+    </div>
+    <div class="timer-custom-row">
+      <span>カスタム</span>
+      <input class="input-num" type="number" min="10" max="600"
+        value="${t.preset}" data-timer-custom="${exId}" />
+      <span>秒</span>
+    </div>
+    ` : ''}
+
+    <div class="timer-display ${cls}" id="timer-disp-${exId}">
+      ${formatSec(t.mode==='countdown' ? (t.running ? t.cur : t.preset) : (t.running ? t.cur : 0))}
+    </div>
+
+    <div class="timer-ctrl-row">
+      ${t.running ? `
+        <button class="btn-timer-stop" data-timer-stop="${exId}">⏹ ストップ</button>
+        <button class="btn-timer-reset" data-timer-reset="${exId}">リセット</button>
+      ` : `
+        <button class="btn-timer-start${t.mode==='stopwatch'?' cyan':''}" data-timer-start="${exId}">
+          ▶ スタート
+        </button>
+        ${t.mode==='countdown' ? `<button class="btn-timer-reset" data-timer-reset="${exId}">リセット</button>` : ''}
+      `}
+    </div>
+  `;
+}
+
+// ── Log tab ──────────────────────────────────────────────────────
+function renderLog() {
+  if (logs.length === 0) return `<div class="empty">まだログがありません</div>`;
+  return logs.map(log => `
+    <div class="log-card">
+      <div class="log-date">${log.date}</div>
+      ${log.entries.map(e => `
+        <div class="log-entry">
+          <span class="log-entry-name">${e.name}</span>
+          <span class="log-entry-detail">${e.weight}kg × ${e.sets}set</span>
+          <span class="log-entry-sub">${(e.weight*e.sets).toLocaleString()}kg</span>
+        </div>
+      `).join('')}
+      <div class="log-total">本日の総重量：<strong>${log.total.toLocaleString()} kg</strong></div>
+    </div>
+  `).join('');
+}
+
+// ── Stats tab ────────────────────────────────────────────────────
+function renderStats() {
+  const avg = logs.length > 0 ? Math.round(totalWeight / logs.length) : 0;
+  const recent = [...logs].slice(0, 8).reverse();
+  const maxTotal = recent.length > 0 ? Math.max(...recent.map(l=>l.total)) : 1;
+
+  return `
+    <div class="stat-grid">
+      <div class="stat-card wide">
+        <div class="stat-label">累計扱った総重量</div>
+        <div class="stat-value">${totalWeight.toLocaleString()} <span class="stat-unit">kg</span></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">記録日数</div>
+        <div class="stat-value">${logs.length} <span class="stat-unit">日</span></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">平均 / 日</div>
+        <div class="stat-value">${avg.toLocaleString()} <span class="stat-unit">kg</span></div>
+      </div>
+    </div>
+
+    ${recent.length > 0 ? `
+      <div class="stat-card">
+        <div class="stat-label" style="margin-bottom:14px">直近セッション 総重量推移</div>
+        ${recent.map(log => `
+          <div class="bar-row">
+            <span class="bar-label">${log.date.replace(/\d{4}年/,'')}</span>
+            <div class="bar-track">
+              <div class="bar-fill" style="width:${Math.round((log.total/maxTotal)*100)}%"></div>
+            </div>
+            <span class="bar-val">${log.total.toLocaleString()}kg</span>
+          </div>
+        `).join('')}
+      </div>
+    ` : ''}
+  `;
+}
+
+// ================================================================
+//  TIMER ENGINE
+// ================================================================
+const timerIntervals = {};
+
+function getOrInitTimer(exId) {
+  if (!session[exId]) session[exId] = { sets: [], open: true };
+  if (!session[exId].timer) {
+    session[exId].timer = { mode: 'countdown', preset: 90, cur: 90, running: false };
+  }
+  return session[exId].timer;
+}
+
+function timerStart(exId) {
+  const t = getOrInitTimer(exId);
+  if (t.running) return;
+  if (t.mode === 'countdown' && t.cur <= 0) t.cur = t.preset;
+  if (t.mode === 'stopwatch') t.cur = 0;
+  t.running = true;
+
+  timerIntervals[exId] = setInterval(() => {
+    const tt = session[exId]?.timer;
+    if (!tt) { clearInterval(timerIntervals[exId]); return; }
+
+    if (tt.mode === 'countdown') {
+      tt.cur = Math.max(0, tt.cur - 1);
+      updateTimerDisplay(exId, tt);
+      if (tt.cur <= 0) {
+        clearInterval(timerIntervals[exId]);
+        tt.running = false;
+        updateTimerDisplay(exId, tt);
+      }
+    } else {
+      tt.cur += 1;
+      updateTimerDisplay(exId, tt);
+    }
+  }, 1000);
+}
+
+function timerStop(exId) {
+  const t = getOrInitTimer(exId);
+  t.running = false;
+  clearInterval(timerIntervals[exId]);
+  updateTimerDisplay(exId, t);
+}
+
+function timerReset(exId) {
+  const t = getOrInitTimer(exId);
+  t.running = false;
+  clearInterval(timerIntervals[exId]);
+  t.cur = t.mode === 'countdown' ? t.preset : 0;
+  updateTimerDisplay(exId, t);
+}
+
+function updateTimerDisplay(exId, t) {
+  const el = document.getElementById(`timer-disp-${exId}`);
+  if (!el) { clearInterval(timerIntervals[exId]); return; }
+  const sec = t.mode === 'countdown' ? t.cur : t.cur;
+  el.textContent = formatSec(sec);
+  el.className = 'timer-display ' + (!t.running ? 'idle'
+    : t.mode === 'countdown'
+      ? (t.cur <= 10 ? 'warning' : 'running-countdown')
+      : 'running-stopwatch');
+}
+
+// ================================================================
+//  EVENT BINDING
+// ================================================================
+let dragSrcId = null;
+let dragOverId = null;
+
+function bindEvents() {
+  const content = document.getElementById('content');
+  if (!content) return;
+
+  // ── Tab switching
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      currentTab = btn.dataset.tab;
+      render();
+    });
+  });
+
+  // ── Add exercise
+  document.getElementById('btn-add-ex')?.addEventListener('click', () => openModal());
+
+  // ── Save log
+  document.getElementById('btn-save-log')?.addEventListener('click', saveLog);
+
+  // ── Exercise card delegation
+  content.addEventListener('click', (e) => {
+    // Toggle open/close
+    const toggleBtn = e.target.closest('[data-toggle]');
+    if (toggleBtn) {
+      const id = +toggleBtn.dataset.toggle;
+      if (!session[id]) session[id] = { sets: [], open: false };
+      session[id].open = !session[id].open;
+      renderExList();
+      return;
+    }
+
+    // Edit exercise
+    const editBtn = e.target.closest('[data-edit]');
+    if (editBtn) {
+      const ex = exercises.find(x => x.id === +editBtn.dataset.edit);
+      if (ex) openModal(ex);
+      return;
+    }
+
+    // Delete exercise
+    const delBtn = e.target.closest('[data-delete]');
+    if (delBtn) {
+      const id = +delBtn.dataset.delete;
+      if (!confirm('この種目を削除しますか？')) return;
+      exercises = exercises.filter(x => x.id !== id);
+      saveExercises();
+      delete session[id];
+      clearInterval(timerIntervals[id]);
+      renderExList();
+      return;
+    }
+
+    // Set tap
+    const setTapBtn = e.target.closest('[data-set-tap]');
+    if (setTapBtn) {
+      const id = +setTapBtn.dataset.setTap;
+      if (!session[id]) session[id] = { sets: [], open: true };
+      session[id].sets.push({ time: nowHHMM() });
+
+      // Ripple effect
+      const rect = setTapBtn.getBoundingClientRect();
+      const ripple = document.createElement('div');
+      ripple.className = 'ripple';
+      const x = (e.clientX || rect.left + rect.width/2) - rect.left - 20;
+      const y = (e.clientY || rect.top + rect.height/2) - rect.top - 20;
+      ripple.style.left = x + 'px';
+      ripple.style.top = y + 'px';
+      setTapBtn.appendChild(ripple);
+      setTimeout(() => ripple.remove(), 500);
+
+      renderExList();
+      return;
+    }
+
+    // Undo last set
+    const undoBtn = e.target.closest('[data-undo]');
+    if (undoBtn) {
+      const id = +undoBtn.dataset.undo;
+      if (session[id]?.sets?.length > 0) {
+        session[id].sets.pop();
+        renderExList();
+        showToast('↩ 最後のセットを取り消しました');
+      }
+      return;
+    }
+
+    // Timer start
+    const tsBtn = e.target.closest('[data-timer-start]');
+    if (tsBtn) { timerStart(+tsBtn.dataset.timerStart); return; }
+
+    // Timer stop
+    const tStopBtn = e.target.closest('[data-timer-stop]');
+    if (tStopBtn) { timerStop(+tStopBtn.dataset.timerStop); return; }
+
+    // Timer reset
+    const tResetBtn = e.target.closest('[data-timer-reset]');
+    if (tResetBtn) { timerReset(+tResetBtn.dataset.timerReset); return; }
+
+    // Timer mode
+    const tModeBtn = e.target.closest('[data-timer-mode]');
+    if (tModeBtn) {
+      const id = +tModeBtn.dataset.timerMode;
+      const mode = tModeBtn.dataset.mode;
+      timerStop(id);
+      const t = getOrInitTimer(id);
+      t.mode = mode;
+      t.cur = mode === 'countdown' ? t.preset : 0;
+      renderExList();
+      return;
+    }
+
+    // Timer preset
+    const tPresetBtn = e.target.closest('[data-timer-preset]');
+    if (tPresetBtn) {
+      const id = +tPresetBtn.dataset.timerPreset;
+      const sec = +tPresetBtn.dataset.sec;
+      timerStop(id);
+      const t = getOrInitTimer(id);
+      t.preset = sec;
+      t.cur = sec;
+      renderExList();
+      return;
+    }
+  });
+
+  // Timer custom input
+  content.addEventListener('change', (e) => {
+    const customInput = e.target.closest('[data-timer-custom]');
+    if (customInput) {
+      const id = +customInput.dataset.timerCustom;
+      const val = Math.max(10, Math.min(600, +customInput.value || 90));
+      timerStop(id);
+      const t = getOrInitTimer(id);
+      t.preset = val;
+      t.cur = val;
+      renderExList();
+    }
+  });
+
+  // ── Drag & drop reorder
+  bindDragDrop();
+}
+
+function bindDragDrop() {
+  document.querySelectorAll('.ex-card').forEach(card => {
+    card.addEventListener('dragstart', () => {
+      dragSrcId = +card.dataset.exid;
+      card.classList.add('dragging');
+    });
+    card.addEventListener('dragend', () => {
+      card.classList.remove('dragging');
+      document.querySelectorAll('.ex-card').forEach(c => c.classList.remove('drag-over'));
+    });
+    card.addEventListener('dragover', e => {
+      e.preventDefault();
+      dragOverId = +card.dataset.exid;
+      document.querySelectorAll('.ex-card').forEach(c =>
+        c.classList.toggle('drag-over', +c.dataset.exid === dragOverId && dragSrcId !== dragOverId)
+      );
+    });
+    card.addEventListener('drop', e => {
+      e.preventDefault();
+      if (dragSrcId === null || dragSrcId === dragOverId) return;
+      const from = exercises.findIndex(x => x.id === dragSrcId);
+      const to   = exercises.findIndex(x => x.id === dragOverId);
+      if (from < 0 || to < 0) return;
+      const next = [...exercises];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      exercises = next;
+      saveExercises();
+      dragSrcId = null;
+      renderExList();
+    });
+  });
+}
+
+// Partial re-render for workout list only
+function renderExList() {
+  const list = document.getElementById('ex-list');
+  if (!list) return;
+  list.innerHTML = exercises.map(renderExCard).join('');
+  bindDragDrop();
+
+  // re-bind timer events for newly created elements (already handled by delegation)
+}
+
+// ── Save log ─────────────────────────────────────────────────────
+function saveLog() {
+  const entries = exercises
+    .map(ex => {
+      const s = session[ex.id];
+      if (!s || s.sets.length === 0) return null;
+      return { name: ex.name, weight: ex.weight, sets: s.sets.length };
+    })
+    .filter(Boolean);
+
+  if (entries.length === 0) {
+    showToast('⚠️ セット完了の種目がありません');
+    return;
+  }
+
+  const dayTotal = entries.reduce((sum, e) => sum + e.weight * e.sets, 0);
+
+  // Remove today's log if exists, prepend new
+  logs = [
+    { date: todayStr(), entries, total: dayTotal },
+    ...logs.filter(l => l.date !== todayStr())
+  ];
+  totalWeight += dayTotal;
+
+  saveLogs();
+  saveTotalWeight();
+
+  // Reset session
+  session = {};
+  Object.keys(timerIntervals).forEach(k => clearInterval(timerIntervals[k]));
+
+  showToast(`✅ 保存完了！本日の総重量 ${dayTotal.toLocaleString()} kg`);
+  render();
+}
+
+// ================================================================
+//  MODAL (Add / Edit)
+// ================================================================
+function openModal(ex = null) {
+  const isEdit = !!ex;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal-sheet">
+      <div class="modal-pill"></div>
+      <div class="modal-title">${isEdit ? '種目を編集' : '種目を追加'}</div>
+
+      <label class="form-label">種目名</label>
+      <input class="form-input" id="modal-name" type="text"
+        value="${isEdit ? ex.name : ''}" placeholder="例：ベンチプレス" />
+
+      <label class="form-label">重量 (kg)</label>
+      <input class="form-input" id="modal-weight" type="number"
+        value="${isEdit ? ex.weight : 60}" min="0" step="0.5" />
+
+      <div class="modal-btn-row">
+        <button class="btn-cancel" id="modal-cancel">キャンセル</button>
+        <button class="btn-confirm" id="modal-confirm">保存</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(overlay);
+  document.getElementById('modal-name').focus();
+
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+
+  document.getElementById('modal-cancel').addEventListener('click', () => overlay.remove());
+
+  document.getElementById('modal-confirm').addEventListener('click', () => {
+    const name   = document.getElementById('modal-name').value.trim();
+    const weight = parseFloat(document.getElementById('modal-weight').value) || 0;
+    if (!name) { showToast('⚠️ 種目名を入力してください'); return; }
+
+    if (isEdit) {
+      exercises = exercises.map(x => x.id === ex.id ? { ...x, name, weight } : x);
+    } else {
+      exercises.push({ id: uid(), name, weight });
+    }
+    saveExercises();
+    overlay.remove();
+    renderExList();
+  });
+}
+
+// ================================================================
+//  PWA SERVICE WORKER
+// ================================================================
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js');
+  });
+}
+
+// ================================================================
+//  INIT
+// ================================================================
+render();
