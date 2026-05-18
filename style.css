@@ -757,3 +757,43 @@ button {
   color: #000;
   border-color: transparent;
 }
+/* ── HIIT ── */
+.hiit-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-top: 20px;
+}
+.hiit-header {
+  font-size: 24px;
+  font-weight: 900;
+  color: var(--text);
+  margin-bottom: 10px;
+  letter-spacing: 2px;
+}
+.hiit-set {
+  font-size: 18px;
+  color: var(--muted2);
+  margin-bottom: 20px;
+  font-weight: 700;
+}
+.hiit-phase {
+  font-size: 28px;
+  font-weight: 900;
+  margin-bottom: 10px;
+  letter-spacing: 2px;
+}
+.hiit-timer {
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: 120px;
+  line-height: 1;
+  margin-bottom: 20px;
+}
+.hiit-work { color: var(--accent); }
+.hiit-rest { color: var(--cyan); }
+.hiit-finish { color: var(--green); }

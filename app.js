@@ -29,6 +29,58 @@ let isSortMode = false;
 // session: { [exId]: { sets: [{time}] } }
 let session = {};
 
+// HIIT State
+let hiitState = {
+  status: 'idle', // idle, running, paused, finished
+  phase: 'work',  // work, rest
+  timeLeft: 20,
+  currentSet: 1,
+  totalSets: 8,
+  timerId: null
+};
+
+// Web Audio API for Beep
+let audioCtx;
+function initAudio() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+}
+
+function playBeep(type) {
+  if (!audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  
+  if (type === 'work') {
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(880, audioCtx.currentTime); // 高音
+    gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.6);
+    osc.start(audioCtx.currentTime);
+    osc.stop(audioCtx.currentTime + 0.6);
+  } else if (type === 'rest') {
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(440, audioCtx.currentTime); // 中音
+    gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.4);
+    osc.start(audioCtx.currentTime);
+    osc.stop(audioCtx.currentTime + 0.4);
+  } else if (type === 'finish') {
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(1046.5, audioCtx.currentTime); // 完了音
+    gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 1.0);
+    osc.start(audioCtx.currentTime);
+    osc.stop(audioCtx.currentTime + 1.0);
+  }
+}
+
 // ── Utility ──────────────────────────────────────────────────────
 function todayStr() {
   const d = new Date();
@@ -71,6 +123,7 @@ function render() {
     ${renderTabBar()}
     <div class="content" id="content">
       ${currentTab === 'workout' ? renderWorkout()
+        : currentTab === 'hiit'  ? renderHiit()
         : currentTab === 'log'   ? renderLog()
         :                          renderStats()}
     </div>
@@ -94,6 +147,7 @@ function renderHeader() {
 function renderTabBar() {
   const tabs = [
     ['workout', '🏋️', 'トレーニング'],
+    ['hiit',    '🚴', 'ヒート'],
     ['log',     '📅', 'ログ'],
     ['stats',   '📊', '統計'],
   ];
@@ -236,6 +290,75 @@ function renderTimer(exId, sess) {
   `;
 }
 
+// ── HIIT tab ─────────────────────────────────────────────────────
+function renderHiit() {
+  const phaseText = hiitState.status === 'finished' ? 'COMPLETED' : hiitState.phase === 'work' ? 'WORK (20s)' : 'REST (10s)';
+  const colorClass = hiitState.status === 'finished' ? 'hiit-finish' : hiitState.phase === 'work' ? 'hiit-work' : 'hiit-rest';
+  
+  return `
+    <div class="hiit-container">
+      <div class="hiit-header">HIIT BIKE</div>
+      <div class="hiit-set" id="hiit-set-disp">Set: ${hiitState.currentSet} / ${hiitState.totalSets}</div>
+      <div class="hiit-phase ${colorClass}" id="hiit-phase-disp">${phaseText}</div>
+      <div class="hiit-timer ${colorClass}" id="hiit-timer-disp">${hiitState.timeLeft}</div>
+      
+      <div class="timer-ctrl-row" style="margin-top: 30px;">
+        ${hiitState.status === 'idle' || hiitState.status === 'finished' ? `
+          <button class="btn-timer-start" id="btn-hiit-start">▶ スタート</button>
+        ` : hiitState.status === 'running' ? `
+          <button class="btn-timer-stop" id="btn-hiit-pause">⏸ ストップ</button>
+        ` : `
+          <button class="btn-timer-start" id="btn-hiit-resume">▶ リスタート</button>
+        `}
+        <button class="btn-timer-reset" id="btn-hiit-reset">リセット</button>
+      </div>
+    </div>
+  `;
+}
+
+function updateHiitDisplay() {
+  const timerEl = document.getElementById('hiit-timer-disp');
+  if (!timerEl) return;
+  const phaseEl = document.getElementById('hiit-phase-disp');
+  const setEl = document.getElementById('hiit-set-disp');
+  
+  timerEl.textContent = hiitState.timeLeft;
+  setEl.textContent = `Set: ${hiitState.currentSet} / ${hiitState.totalSets}`;
+  
+  const phaseText = hiitState.status === 'finished' ? 'COMPLETED' : hiitState.phase === 'work' ? 'WORK (20s)' : 'REST (10s)';
+  const colorClass = hiitState.status === 'finished' ? 'hiit-finish' : hiitState.phase === 'work' ? 'hiit-work' : 'hiit-rest';
+  
+  phaseEl.textContent = phaseText;
+  timerEl.className = `hiit-timer ${colorClass}`;
+  phaseEl.className = `hiit-phase ${colorClass}`;
+}
+
+function hiitTick() {
+  hiitState.timeLeft--;
+  if (hiitState.timeLeft <= 0) {
+    if (hiitState.phase === 'work') {
+      hiitState.phase = 'rest';
+      hiitState.timeLeft = 10;
+      playBeep('rest');
+    } else {
+      if (hiitState.currentSet >= hiitState.totalSets) {
+        hiitState.status = 'finished';
+        hiitState.timeLeft = 0;
+        playBeep('finish');
+        clearInterval(hiitState.timerId);
+        render();
+        return;
+      } else {
+        hiitState.currentSet++;
+        hiitState.phase = 'work';
+        hiitState.timeLeft = 20;
+        playBeep('work');
+      }
+    }
+  }
+  updateHiitDisplay();
+}
+
 // ── Log tab ──────────────────────────────────────────────────────
 function renderLog() {
   if (logs.length === 0) return `<div class="empty">まだログがありません</div>`;
@@ -314,7 +437,7 @@ function renderStats() {
 }
 
 // ================================================================
-//  TIMER ENGINE
+//  TIMER ENGINE (Workout)
 // ================================================================
 const timerIntervals = {};
 
@@ -395,7 +518,7 @@ function bindEvents() {
     });
   });
 
- // ── Add exercise
+  // ── Add exercise
   document.getElementById('btn-add-ex')?.addEventListener('click', () => openModal());
 
   // ── Toggle Sort Mode
@@ -406,6 +529,42 @@ function bindEvents() {
 
   // ── Save log
   document.getElementById('btn-save-log')?.addEventListener('click', saveLog);
+
+  // ── HIIT Events
+  document.getElementById('btn-hiit-start')?.addEventListener('click', () => {
+    initAudio();
+    if (hiitState.status === 'finished') {
+      hiitState.currentSet = 1;
+      hiitState.phase = 'work';
+      hiitState.timeLeft = 20;
+    }
+    hiitState.status = 'running';
+    playBeep('work');
+    hiitState.timerId = setInterval(hiitTick, 1000);
+    render();
+  });
+  
+  document.getElementById('btn-hiit-pause')?.addEventListener('click', () => {
+    hiitState.status = 'paused';
+    clearInterval(hiitState.timerId);
+    render();
+  });
+  
+  document.getElementById('btn-hiit-resume')?.addEventListener('click', () => {
+    initAudio();
+    hiitState.status = 'running';
+    hiitState.timerId = setInterval(hiitTick, 1000);
+    render();
+  });
+  
+  document.getElementById('btn-hiit-reset')?.addEventListener('click', () => {
+    clearInterval(hiitState.timerId);
+    hiitState.status = 'idle';
+    hiitState.phase = 'work';
+    hiitState.timeLeft = 20;
+    hiitState.currentSet = 1;
+    render();
+  });
 
   // ── Data Transfer (Export/Import)
   document.getElementById('btn-export')?.addEventListener('click', () => {
@@ -544,15 +703,15 @@ function bindEvents() {
 
     // Timer start
     const tsBtn = e.target.closest('[data-timer-start]');
-    if (tsBtn) { timerStart(+tsBtn.dataset.timerStart); return; }
+    if (tsBtn && !tsBtn.id.includes('hiit')) { timerStart(+tsBtn.dataset.timerStart); return; }
 
     // Timer stop
     const tStopBtn = e.target.closest('[data-timer-stop]');
-    if (tStopBtn) { timerStop(+tStopBtn.dataset.timerStop); return; }
+    if (tStopBtn && !tStopBtn.id.includes('hiit')) { timerStop(+tStopBtn.dataset.timerStop); return; }
 
     // Timer reset
     const tResetBtn = e.target.closest('[data-timer-reset]');
-    if (tResetBtn) { timerReset(+tResetBtn.dataset.timerReset); return; }
+    if (tResetBtn && !tResetBtn.id.includes('hiit')) { timerReset(+tResetBtn.dataset.timerReset); return; }
 
     // Timer mode
     const tModeBtn = e.target.closest('[data-timer-mode]');
