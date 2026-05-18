@@ -110,25 +110,26 @@ function renderWorkout() {
   return `
     <button class="btn-add-exercise" id="btn-add-ex">＋ 種目を追加</button>
     <div id="ex-list">
-      ${exercises.map(renderExCard).join('')}
+      ${exercises.map((ex, idx) => renderExCard(ex, idx)).join('')}
     </div>
     <button class="btn-save-log" id="btn-save-log">💾 今日のログを保存</button>
   `;
 }
 
-function renderExCard(ex) {
+function renderExCard(ex, index) {
   const sess = session[ex.id] || { sets: [] };
   const setCount = sess.sets.length;
 
   return `
-  <div class="ex-card" data-exid="${ex.id}" draggable="true">
+  <div class="ex-card" data-exid="${ex.id}">
     <div class="ex-card-header">
-      <span class="drag-handle" data-drag="${ex.id}">⠿</span>
       <div class="ex-info">
         <div class="ex-name">${ex.name}</div>
         <div class="ex-weight">${ex.weight} kg</div>
       </div>
       <div class="ex-card-actions">
+        <button class="btn-icon" data-move-up="${ex.id}" title="上に移動" ${index === 0 ? 'disabled' : ''}>↑</button>
+        <button class="btn-icon" data-move-down="${ex.id}" title="下に移動" ${index === exercises.length - 1 ? 'disabled' : ''}>↓</button>
         <button class="btn-icon" data-edit="${ex.id}" title="編集">✏️</button>
         <button class="btn-icon danger" data-delete="${ex.id}" title="削除">🗑</button>
         <button class="btn-icon" data-toggle="${ex.id}" title="開閉">
@@ -140,11 +141,10 @@ function renderExCard(ex) {
     ${sess.open ? `
     <div class="ex-card-body">
 
-      <!-- ① セット記録 -->
       <div class="set-counter-section">
         <div class="section-label">セット記録</div>
 
-        <button class="btn-set-tap" data-set-tap="${ex.id}" style="position:relative;overflow:hidden;">
+        <button class="btn-set-tap" data-set-tap="${ex.id}">
           <div class="set-count-display">${setCount}</div>
           <div class="set-count-label">SET COMPLETED</div>
         </button>
@@ -162,7 +162,6 @@ function renderExCard(ex) {
         ` : ''}
       </div>
 
-      <!-- ② レストタイマー (補助) -->
       <div class="rest-timer-section">
         <div class="section-label">レストタイマー（補助）</div>
         ${renderTimer(ex.id, sess)}
@@ -284,7 +283,6 @@ function renderStats() {
       </div>
     ` : ''}
 
-    <!-- ── データ引き継ぎ ── -->
     <div class="transfer-card">
       <div class="transfer-title">📲 機種変更・データ引き継ぎ</div>
       <p class="transfer-desc">
@@ -294,15 +292,13 @@ function renderStats() {
 
       <div class="transfer-section-label">STEP 1 — 旧端末でエクスポート</div>
       <button class="btn-export" id="btn-export">
-        <span class="transfer-btn-icon">⬆️</span>
-        データをエクスポート（ファイル保存）
+        <span class="transfer-btn-icon">⬆️</span>データをエクスポート（ファイル保存）
       </button>
 
       <div class="transfer-section-label" style="margin-top:20px">STEP 2 — 新端末でインポート</div>
       <p class="transfer-note">※ 現在のデータはすべて上書きされます</p>
       <label class="btn-import-label" id="btn-import-label">
-        <span class="transfer-btn-icon">⬇️</span>
-        データをインポート（ファイル選択）
+        <span class="transfer-btn-icon">⬇️</span>データをインポート（ファイル選択）
         <input type="file" id="import-file-input" accept=".json" style="display:none" />
       </label>
     </div>
@@ -329,6 +325,8 @@ function timerStart(exId) {
   if (t.mode === 'stopwatch') t.cur = 0;
   t.running = true;
 
+  renderExList();
+
   timerIntervals[exId] = setInterval(() => {
     const tt = session[exId]?.timer;
     if (!tt) { clearInterval(timerIntervals[exId]); return; }
@@ -339,7 +337,7 @@ function timerStart(exId) {
       if (tt.cur <= 0) {
         clearInterval(timerIntervals[exId]);
         tt.running = false;
-        updateTimerDisplay(exId, tt);
+        renderExList();
       }
     } else {
       tt.cur += 1;
@@ -352,7 +350,7 @@ function timerStop(exId) {
   const t = getOrInitTimer(exId);
   t.running = false;
   clearInterval(timerIntervals[exId]);
-  updateTimerDisplay(exId, t);
+  renderExList();
 }
 
 function timerReset(exId) {
@@ -360,13 +358,13 @@ function timerReset(exId) {
   t.running = false;
   clearInterval(timerIntervals[exId]);
   t.cur = t.mode === 'countdown' ? t.preset : 0;
-  updateTimerDisplay(exId, t);
+  renderExList();
 }
 
 function updateTimerDisplay(exId, t) {
   const el = document.getElementById(`timer-disp-${exId}`);
   if (!el) { clearInterval(timerIntervals[exId]); return; }
-  const sec = t.mode === 'countdown' ? t.cur : t.cur;
+  const sec = t.cur;
   el.textContent = formatSec(sec);
   el.className = 'timer-display ' + (!t.running ? 'idle'
     : t.mode === 'countdown'
@@ -377,15 +375,12 @@ function updateTimerDisplay(exId, t) {
 // ================================================================
 //  EVENT BINDING
 // ================================================================
-let dragSrcId = null;
-let dragOverId = null;
-
 function bindEvents() {
   const content = document.getElementById('content');
   if (!content) return;
 
   // ── Tab switching
-  document.querySelectorAll('.tab-btn').forEach(btn => {
+  document.querySelectorAll('.tab-bar .tab-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       currentTab = btn.dataset.tab;
       render();
@@ -398,8 +393,76 @@ function bindEvents() {
   // ── Save log
   document.getElementById('btn-save-log')?.addEventListener('click', saveLog);
 
+  // ── Data Transfer (Export/Import)
+  document.getElementById('btn-export')?.addEventListener('click', () => {
+    const backupData = { exercises, logs, totalWeight };
+    const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `ironlog_backup_${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('⬆️ データをエクスポートしました');
+  });
+
+  document.getElementById('import-file-input')?.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const data = JSON.parse(evt.target.result);
+        if (data.exercises && data.logs && typeof data.totalWeight === 'number') {
+          exercises = data.exercises;
+          logs = data.logs;
+          totalWeight = data.totalWeight;
+
+          saveExercises();
+          saveLogs();
+          saveTotalWeight();
+
+          showToast('⬇️ データをインポートしました');
+          render();
+        } else {
+          showToast('⚠️ 無効なファイル形式です');
+        }
+      } catch {
+        showToast('⚠️ ファイルの読み込みに失敗しました');
+      }
+    };
+    reader.readAsText(file);
+  });
+
   // ── Exercise card delegation
   content.addEventListener('click', (e) => {
+    // Move up
+    const moveUpBtn = e.target.closest('[data-move-up]');
+    if (moveUpBtn) {
+      const id = +moveUpBtn.dataset.moveUp;
+      const idx = exercises.findIndex(x => x.id === id);
+      if (idx > 0) {
+        [exercises[idx - 1], exercises[idx]] = [exercises[idx], exercises[idx - 1]];
+        saveExercises();
+        renderExList();
+      }
+      return;
+    }
+
+    // Move down
+    const moveDownBtn = e.target.closest('[data-move-down]');
+    if (moveDownBtn) {
+      const id = +moveDownBtn.dataset.moveDown;
+      const idx = exercises.findIndex(x => x.id === id);
+      if (idx >= 0 && idx < exercises.length - 1) {
+        [exercises[idx], exercises[idx + 1]] = [exercises[idx + 1], exercises[idx]];
+        saveExercises();
+        renderExList();
+      }
+      return;
+    }
+
     // Toggle open/close
     const toggleBtn = e.target.closest('[data-toggle]');
     if (toggleBtn) {
@@ -517,53 +580,13 @@ function bindEvents() {
       renderExList();
     }
   });
-
-  // ── Drag & drop reorder
-  bindDragDrop();
-}
-
-function bindDragDrop() {
-  document.querySelectorAll('.ex-card').forEach(card => {
-    card.addEventListener('dragstart', () => {
-      dragSrcId = +card.dataset.exid;
-      card.classList.add('dragging');
-    });
-    card.addEventListener('dragend', () => {
-      card.classList.remove('dragging');
-      document.querySelectorAll('.ex-card').forEach(c => c.classList.remove('drag-over'));
-    });
-    card.addEventListener('dragover', e => {
-      e.preventDefault();
-      dragOverId = +card.dataset.exid;
-      document.querySelectorAll('.ex-card').forEach(c =>
-        c.classList.toggle('drag-over', +c.dataset.exid === dragOverId && dragSrcId !== dragOverId)
-      );
-    });
-    card.addEventListener('drop', e => {
-      e.preventDefault();
-      if (dragSrcId === null || dragSrcId === dragOverId) return;
-      const from = exercises.findIndex(x => x.id === dragSrcId);
-      const to   = exercises.findIndex(x => x.id === dragOverId);
-      if (from < 0 || to < 0) return;
-      const next = [...exercises];
-      const [moved] = next.splice(from, 1);
-      next.splice(to, 0, moved);
-      exercises = next;
-      saveExercises();
-      dragSrcId = null;
-      renderExList();
-    });
-  });
 }
 
 // Partial re-render for workout list only
 function renderExList() {
   const list = document.getElementById('ex-list');
   if (!list) return;
-  list.innerHTML = exercises.map(renderExCard).join('');
-  bindDragDrop();
-
-  // re-bind timer events for newly created elements (already handled by delegation)
+  list.innerHTML = exercises.map((ex, idx) => renderExCard(ex, idx)).join('');
 }
 
 // ── Save log ─────────────────────────────────────────────────────
@@ -583,7 +606,6 @@ function saveLog() {
 
   const dayTotal = entries.reduce((sum, e) => sum + e.weight * e.sets, 0);
 
-  // Remove today's log if exists, prepend new
   logs = [
     { date: todayStr(), entries, total: dayTotal },
     ...logs.filter(l => l.date !== todayStr())
@@ -593,7 +615,6 @@ function saveLog() {
   saveLogs();
   saveTotalWeight();
 
-  // Reset session
   session = {};
   Object.keys(timerIntervals).forEach(k => clearInterval(timerIntervals[k]));
 

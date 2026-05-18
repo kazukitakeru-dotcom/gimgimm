@@ -141,23 +141,11 @@ button {
   transition: border-color 0.2s;
 }
 
-.ex-card.dragging { opacity: 0.5; border-color: var(--accent); }
-.ex-card.drag-over { border-color: var(--accent2); }
-
 .ex-card-header {
   display: flex;
   align-items: center;
   padding: 14px 12px;
   gap: 8px;
-}
-
-.drag-handle {
-  font-size: 18px;
-  color: var(--muted);
-  cursor: grab;
-  padding: 4px;
-  user-select: none;
-  touch-action: none;
 }
 
 .ex-info { flex: 1; min-width: 0; }
@@ -190,6 +178,7 @@ button {
 }
 .btn-icon:active { background: rgba(255,255,255,0.08); }
 .btn-icon.danger { color: var(--red); }
+.btn-icon:disabled { opacity: 0.2; cursor: not-allowed; }
 
 .ex-card-body {
   border-top: 1px solid var(--border);
@@ -550,6 +539,61 @@ button {
   transition: width 0.6s cubic-bezier(0.25,0.46,0.45,0.94);
 }
 .bar-val { font-size: 11px; color: var(--muted2); width: 68px; }
+
+/* ── Data Transfer ── */
+.transfer-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-top: 16px;
+}
+.transfer-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--accent2);
+  margin-bottom: 6px;
+}
+.transfer-desc {
+  font-size: 12px;
+  color: var(--muted2);
+  line-height: 1.6;
+  margin-bottom: 14px;
+}
+.transfer-section-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  letter-spacing: 1px;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+}
+.transfer-note {
+  font-size: 11px;
+  color: var(--red);
+  margin-bottom: 6px;
+}
+.btn-export, .btn-import-label {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+  cursor: pointer;
+  transition: background 0.15s;
+  user-select: none;
+}
+.btn-export:active, .btn-import-label:active {
+  background: rgba(255,255,255,0.05);
+}
+.transfer-btn-icon {
+  margin-right: 4px;
+}
 
 /* ── Modal ── */
 .modal-overlay {
