@@ -24,6 +24,7 @@ let exercises = DB.get('exercises', [
 let logs         = DB.get('logs', []);
 let totalWeight  = DB.get('totalWeight', 0);
 let currentTab   = 'workout';
+let isSortMode = false;
 
 // session: { [exId]: { sets: [{time}] } }
 let session = {};
@@ -108,7 +109,12 @@ function renderTabBar() {
 // ── Workout tab ──────────────────────────────────────────────────
 function renderWorkout() {
   return `
-    <button class="btn-add-exercise" id="btn-add-ex">＋ 種目を追加</button>
+    <div style="display: flex; gap: 10px; margin-bottom: 14px;">
+      <button class="btn-add-exercise" id="btn-add-ex" style="margin-bottom: 0; flex: 1;">＋ 種目を追加</button>
+      <button class="btn-sort-toggle${isSortMode ? ' active' : ''}" id="btn-toggle-sort">
+        ${isSortMode ? '並び替え: ON' : '並び替え: OFF'}
+      </button>
+    </div>
     <div id="ex-list">
       ${exercises.map((ex, idx) => renderExCard(ex, idx)).join('')}
     </div>
@@ -128,8 +134,10 @@ function renderExCard(ex, index) {
         <div class="ex-weight">${ex.weight} kg</div>
       </div>
       <div class="ex-card-actions">
-        <button class="btn-icon" data-move-up="${ex.id}" title="上に移動" ${index === 0 ? 'disabled' : ''}>↑</button>
-        <button class="btn-icon" data-move-down="${ex.id}" title="下に移動" ${index === exercises.length - 1 ? 'disabled' : ''}>↓</button>
+        ${isSortMode ? `
+          <button class="btn-icon" data-move-up="${ex.id}" title="上に移動" ${index === 0 ? 'disabled' : ''}>↑</button>
+          <button class="btn-icon" data-move-down="${ex.id}" title="下に移動" ${index === exercises.length - 1 ? 'disabled' : ''}>↓</button>
+        ` : ''}
         <button class="btn-icon" data-edit="${ex.id}" title="編集">✏️</button>
         <button class="btn-icon danger" data-delete="${ex.id}" title="削除">🗑</button>
         <button class="btn-icon" data-toggle="${ex.id}" title="開閉">
@@ -387,8 +395,14 @@ function bindEvents() {
     });
   });
 
-  // ── Add exercise
+ // ── Add exercise
   document.getElementById('btn-add-ex')?.addEventListener('click', () => openModal());
+
+  // ── Toggle Sort Mode
+  document.getElementById('btn-toggle-sort')?.addEventListener('click', () => {
+    isSortMode = !isSortMode;
+    render();
+  });
 
   // ── Save log
   document.getElementById('btn-save-log')?.addEventListener('click', saveLog);

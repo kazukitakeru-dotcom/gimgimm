@@ -737,3 +737,23 @@ button {
   animation: ripple 0.5s linear;
   pointer-events: none;
 }
+/* ── 並び替えON/OFFトグルボタン ── */
+.btn-sort-toggle {
+  padding: 0 16px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--muted2);
+  font-size: 13px;
+  font-weight: 700;
+  font-family: 'Noto Sans JP', sans-serif;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+/* ON（アクティブ）状態のスタイル */
+.btn-sort-toggle.active {
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  color: #000;
+  border-color: transparent;
+}
