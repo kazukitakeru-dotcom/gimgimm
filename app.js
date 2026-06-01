@@ -219,10 +219,10 @@ function renderGauge(count, target) {
   const segs  = Math.max(1, target);
   const over  = count > target;
   let color;
-  if (over)            color = 'var(--accent)';
-  else if (count >= target) color = 'var(--green)';
-  else if (count / target >= 0.5) color = 'var(--accent2)';
-  else                 color = null; // empty
+  if (over)                        color = 'var(--red)';
+  else if (count >= target)        color = 'var(--green)';
+  else if (count / target >= 0.5)  color = 'var(--accent2)';
+  else                             color = 'var(--cyan)';
 
   let html = `<div class="gauge-wrap">`;
   for (let i = 0; i < segs; i++) {

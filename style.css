@@ -1073,8 +1073,8 @@ button {
   height: 5px;
   width: 16px;
   border-radius: 99px;
-  background: var(--bg3);
-  border: 1px solid rgba(255,255,255,0.1);
+  background: rgba(255,255,255,0.12);
+  border: 1px solid rgba(255,255,255,0.2);
   transition: background 0.2s, border-color 0.2s;
 }
 .gauge-seg.filled {
