@@ -1,4 +1,4 @@
-const CACHE_NAME = 'ironlog-v4';
+const CACHE_NAME = 'ironlog-v5';
 const ASSETS = [
   './',
   './index.html',
