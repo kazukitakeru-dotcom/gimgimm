@@ -1150,3 +1150,146 @@ button {
   transition: background 0.15s;
 }
 .btn-delete-all:active { background: rgba(239,68,68,0.18); }
+/* ================================================================
+   ログの複数記録・日付編集 / Obsidian / 同期
+   ================================================================ */
+
+/* ── 日付をまたいだ記録の注意書き ── */
+.carryover-note {
+  background: rgba(250,204,21,0.08);
+  border: 1px solid rgba(250,204,21,0.35);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text);
+}
+.carryover-note strong { color: var(--accent2); }
+.btn-carryover-today {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+  padding: 9px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  font-family: 'Noto Sans JP', sans-serif;
+  cursor: pointer;
+}
+.btn-carryover-today:active { background: rgba(255,255,255,0.05); }
+
+/* ── ログ画面：1日の中に複数セッション ── */
+.log-date {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.log-weekday { font-size: 12px; color: var(--muted2); font-weight: 500; }
+.log-count-badge {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--bg);
+  background: var(--accent);
+  border-radius: 20px;
+  padding: 2px 8px;
+}
+
+.log-session {
+  background: var(--bg3);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+.log-session-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 6px;
+  margin-bottom: 2px;
+  border-bottom: 1px solid var(--border);
+}
+.log-session-time { font-size: 12px; color: var(--muted2); }
+.log-session-nth {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accent2);
+  border: 1px solid rgba(250,204,21,0.35);
+  border-radius: 20px;
+  padding: 1px 7px;
+}
+.log-session-total {
+  margin-left: auto;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--green);
+}
+
+/* ── 記録プレビューの日付 ── */
+.save-preview-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.save-preview-date {
+  margin-left: auto;
+  color: var(--accent2);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* ── 日付変更モーダル ── */
+.log-edit-summary {
+  font-size: 12px;
+  color: var(--muted2);
+  background: var(--bg3);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-bottom: 4px;
+  line-height: 1.6;
+}
+
+/* ── Obsidian 書き出し ── */
+.btn-obsidian {
+  display: block;
+  width: 100%;
+  padding: 12px;
+  margin-bottom: 8px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+  cursor: pointer;
+  font-family: 'Noto Sans JP', sans-serif;
+  transition: background 0.15s;
+}
+.btn-obsidian:active { background: rgba(255,255,255,0.05); }
+.btn-obsidian:last-child { margin-bottom: 0; }
+
+/* ── 同期 ── */
+.sync-status {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted2);
+  background: var(--bg3);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  word-break: break-all;
+}
+.sync-status.ok    { border-left: 3px solid var(--green); }
+.sync-status.error { border-left: 3px solid var(--red); color: var(--red); }
+.sync-login-msg {
+  font-size: 12px;
+  color: var(--accent2);
+  line-height: 1.6;
+  min-height: 18px;
+  margin: 10px 0 0;
+}

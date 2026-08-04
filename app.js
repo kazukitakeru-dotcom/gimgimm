@@ -79,14 +79,26 @@ exercises = exercises.map(ex => ({
   ...ex
 }));
 
-let logs        = DB.get('logs', []);
-let totalWeight = DB.get('totalWeight', 0);
-let cardioLogs  = DB.get('cardioLogs', []);
-let currentTab  = 'workout';
-let isSortMode  = false;
+// ── ログのデータ構造（v3）──────────────────────────────────────
+//   logs:       [{ id, date:'YYYY-MM-DD', time:'HH:MM', entries:[...], total }]
+//   entries:    [{ exId, name, sets, total, setList:[{time,weight}] }]
+//   cardioLogs: [{ id, date:'YYYY-MM-DD', time:'HH:MM', mode, type, ... }]
+//
+//   ・1日に何件でも残せる（同じ日付の記録を消さない）
+//   ・累計重量は保存しない。毎回 logs から計算する（二重加算を防ぐため）
+let logs       = sortByDate(migrateLogs(DB.get('logs', [])));
+let cardioLogs = sortByDate(migrateCardio(DB.get('cardioLogs', [])));
+let currentTab = 'workout';
+let isSortMode = false;
+
+// 旧形式（日本語の日付文字列）から読み込んだ場合はここで新形式に置き換える
+DB.set('logs', logs);
+DB.set('cardioLogs', cardioLogs);
 
 // session: { [exId]: { sets:[{time,weight}], open, timer, undoPending } }
 let session = {};
+// 記録を始めた日付。日付をまたいでも「始めた日」の記録として保存するために持つ
+let sessionMeta = DB.get('sessionMeta_v1', {});
 
 function initSession() {
   const saved = DB.get('session_v2', {});
@@ -181,13 +193,35 @@ async function playAudio(type) {
 }
 
 // ── Utility ──────────────────────────────────────────────────────
-function todayStr() {
-  const d = new Date();
-  return `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日`;
+const WDAY = ['日','月','火','水','木','金','土'];
+
+function pad2(n) { return String(n).padStart(2, '0'); }
+function toISODate(d) { return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`; }
+function todayISO() { return toISODate(new Date()); }
+function todayStr() { return jpDate(todayISO()); }
+
+// 'YYYY-MM-DD' → '2026年8月5日'
+function jpDate(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '');
+  return m ? `${+m[1]}年${+m[2]}月${+m[3]}日` : (iso || '');
 }
+function jpDateShort(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '');
+  return m ? `${+m[2]}/${+m[3]}` : (iso || '');
+}
+function isoWeekday(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || '');
+  return m ? WDAY[new Date(+m[1], +m[2]-1, +m[3]).getDay()] : '';
+}
+// '2026年8月5日' → '2026-08-05'（旧データの読み替え用）
+function parseJPDate(s) {
+  const m = /(\d{4})年(\d{1,2})月(\d{1,2})日/.exec(s || '');
+  return m ? `${m[1]}-${pad2(m[2])}-${pad2(m[3])}` : null;
+}
+
 function nowHHMM() {
   const d = new Date();
-  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 function formatSec(s) {
   const m  = String(Math.floor(s/60)).padStart(2,'0');
@@ -195,11 +229,85 @@ function formatSec(s) {
   return `${m}:${sc}`;
 }
 function uid() { return Date.now() + Math.random(); }
+// ログ用のID。端末をまたいでも衝突しないように乱数を混ぜた文字列にする
+function newId() { return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8); }
 
-function saveExercises() { DB.set('exercises', exercises); }
-function saveLogs()       { DB.set('logs', logs); }
-function saveTotalWeight(){ DB.set('totalWeight', totalWeight); }
-function saveCardioLogs() { DB.set('cardioLogs', cardioLogs); }
+// HTMLに埋め込む前に必ず通す（種目名やメモに " や < が入ると表示が壊れるため）
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g,
+    c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+}
+
+// 新しい順（日付 → 時刻）に並べる
+function sortByDate(list) {
+  return [...list].sort((a, b) =>
+    (b.date || '').localeCompare(a.date || '') || (b.time || '').localeCompare(a.time || ''));
+}
+
+// 累計重量は保存値ではなく毎回ログから計算する
+function totalWeight() { return logs.reduce((s, l) => s + (l.total || 0), 0); }
+function trainedDays() { return new Set(logs.map(l => l.date)).size; }
+
+// ── 旧データの移行 ───────────────────────────────────────────────
+function migrateLogs(list) {
+  return (list || []).map(l => {
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(l.date || '') ? l.date
+               : (parseJPDate(l.date) || todayISO());
+    const entries = (l.entries || []).map(e => {
+      const sets  = e.sets || 0;
+      const total = e.total ?? (e.weight || 0) * sets;
+      return {
+        exId:    e.exId ?? null,
+        name:    e.name,
+        sets,
+        total,
+        setList: e.setList || null,   // 旧データはセットごとの内訳を持っていない
+      };
+    });
+    return {
+      id:      l.id || newId(),
+      date,
+      time:    l.time || '',
+      entries,
+      total:   l.total ?? entries.reduce((s, e) => s + e.total, 0),
+    };
+  });
+}
+
+function migrateCardio(list) {
+  return (list || []).map(c => {
+    const o = { ...c };
+    // 旧データの time は「分」だった。記録時刻(HH:MM)と紛らわしいので minutes に移す
+    if (o.minutes === undefined && o.time !== undefined && !/^\d{1,2}:\d{2}$/.test(String(o.time))) {
+      o.minutes = o.time;
+    }
+    o.id   = c.id || newId();
+    o.date = /^\d{4}-\d{2}-\d{2}$/.test(c.date || '') ? c.date : (parseJPDate(c.date) || todayISO());
+    o.time = /^\d{1,2}:\d{2}$/.test(String(c.time || '')) ? c.time : '';
+    return o;
+  });
+}
+
+function saveExercises()  { DB.set('exercises', exercises); notifySaved('exercises'); }
+function saveLogs()       { logs = sortByDate(logs); DB.set('logs', logs); notifySaved('logs'); }
+function saveCardioLogs() { cardioLogs = sortByDate(cardioLogs); DB.set('cardioLogs', cardioLogs); notifySaved('cardio'); }
+function saveSessionMeta(){ DB.set('sessionMeta_v1', sessionMeta); }
+
+// sync.js が読み込まれていれば、保存のたびに同期を予約してもらう
+function notifySaved(kind) {
+  try { if (window.onIronLogSaved) window.onIronLogSaved(kind); } catch {}
+}
+
+// 1件の種目の「60kg × 3set」表示。セットごとに重量が違う場合は範囲で出す
+function entryWeightLabel(e) {
+  const ws = (e.setList || []).map(s => s.weight).filter(w => typeof w === 'number');
+  if (!ws.length) {
+    const w = e.sets ? Math.round((e.total / e.sets) * 10) / 10 : 0;
+    return `${w}kg`;
+  }
+  const min = Math.min(...ws), max = Math.max(...ws);
+  return min === max ? `${min}kg` : `${min}〜${max}kg`;
+}
 
 // ── Toast ────────────────────────────────────────────────────────
 let toastTimer;
@@ -250,6 +358,8 @@ function render() {
     </div>
   `;
   bindEvents();
+  // sync.js が読み込まれていれば同期カードを差し込んでもらう
+  try { if (window.onIronLogRender) window.onIronLogRender(); } catch {}
 }
 
 // ── Header ──────────────────────────────────────────────────────
@@ -282,22 +392,41 @@ function renderTabBar() {
 }
 
 // ── Workout tab ──────────────────────────────────────────────────
-function renderWorkout() {
-  const previewEntries = buildPreviewEntries();
-  const previewHtml = previewEntries.length > 0 ? `
+function renderPreviewCard(entries) {
+  if (entries.length === 0) return '';
+  const date = sessionMeta.date || todayISO();
+  const nth  = logs.filter(l => l.date === date).length + 1;
+  return `
     <div class="save-preview-card">
-      <div class="save-preview-title">📋 今回の記録プレビュー</div>
-      ${previewEntries.map(e => `
+      <div class="save-preview-title">
+        📋 今回の記録プレビュー
+        <span class="save-preview-date">${jpDate(date)}${nth > 1 ? ` ・${nth}件目` : ''}</span>
+      </div>
+      ${entries.map(e => `
         <div class="save-preview-row">
-          <span class="save-preview-name">${e.name}</span>
+          <span class="save-preview-name">${esc(e.name)}</span>
           <span class="save-preview-sets">${e.sets} set</span>
           <span class="save-preview-total">${e.total.toLocaleString()} kg</span>
         </div>
       `).join('')}
-    </div>
-  ` : '';
+    </div>`;
+}
+
+function renderWorkout() {
+  const previewEntries = buildPreviewEntries();
+  const previewHtml = renderPreviewCard(previewEntries);
+
+  // 日付をまたいで記録が残っている場合の注意書き
+  const carryOver = (previewEntries.length > 0 && sessionMeta.date && sessionMeta.date !== todayISO())
+    ? `<div class="carryover-note">
+         ⚠️ <strong>${jpDate(sessionMeta.date)}</strong> に始めた記録が残っています。<br>
+         このまま保存するとその日の記録になります。
+         <button class="btn-carryover-today" id="btn-carryover-today">今日の記録にする</button>
+       </div>`
+    : '';
 
   return `
+    ${carryOver}
     <div style="display: flex; gap: 10px; margin-bottom: 14px;">
       <button class="btn-add-exercise" id="btn-add-ex" style="margin-bottom: 0; flex: 1;">＋ 種目を追加</button>
       <button class="btn-sort-toggle${isSortMode ? ' active' : ''}" id="btn-toggle-sort">
@@ -317,8 +446,9 @@ function buildPreviewEntries() {
     .map(ex => {
       const s = session[ex.id];
       if (!s || s.sets.length === 0) return null;
-      const total = s.sets.reduce((sum, st) => sum + (st.weight ?? ex.weight), 0);
-      return { name: ex.name, sets: s.sets.length, total };
+      const setList = s.sets.map(st => ({ time: st.time, weight: st.weight ?? ex.weight }));
+      const total   = setList.reduce((sum, st) => sum + st.weight, 0);
+      return { exId: ex.id, name: ex.name, sets: setList.length, total, setList };
     })
     .filter(Boolean);
 }
@@ -332,7 +462,7 @@ function renderExCard(ex, index) {
   <div class="ex-card" data-exid="${ex.id}">
     <div class="ex-card-header">
       <div class="ex-info">
-        <div class="ex-name">${ex.name}</div>
+        <div class="ex-name">${esc(ex.name)}</div>
         <div class="ex-header-bottom">
           <div class="ex-weight">${ex.weight} kg</div>
           <div class="ex-gauge-wrap">${renderGauge(setCount, target)}</div>
@@ -517,7 +647,7 @@ function renderAudioSettings() {
             <button class="audio-opt-btn${audioSettings[key]==='beep'?' selected':''}"   data-audio-type="${key}" data-audio-opt="beep">ビープ</button>
             <button class="audio-opt-btn${audioSettings[key]==='silent'?' selected':''}" data-audio-type="${key}" data-audio-opt="silent">無音</button>
             <button class="audio-opt-btn${audioSettings[key]==='custom'?' selected':''}" data-audio-type="${key}" data-audio-opt="custom">
-              ${audioUploadNames[key] ? '✓ ' + audioUploadNames[key] : 'MP3'}
+              ${audioUploadNames[key] ? '✓ ' + esc(audioUploadNames[key]) : 'MP3'}
             </button>
           </div>
           ${audioSettings[key] === 'custom' ? `
@@ -604,7 +734,7 @@ function hiitTick() {
 
 // ── Cardio tab ───────────────────────────────────────────────────
 function renderCardio() {
-  const todayCardio = cardioLogs.filter(l => l.date === todayStr());
+  const todayCardio = cardioLogs.filter(l => l.date === todayISO());
   return `
     <div class="cardio-container">
       <div class="cardio-mode-toggle">
@@ -622,7 +752,7 @@ function renderCardio() {
       ${todayCardio.length > 0 ? `
         <div class="cardio-log-section">
           <div class="section-label" style="margin-top:16px">本日の有酸素記録</div>
-          ${todayCardio.map(l => renderCardioLogItem(l)).join('')}
+          ${todayCardio.map(l => renderCardioLogItem(l, true)).join('')}
         </div>
       ` : ''}
     </div>
@@ -649,7 +779,7 @@ function renderCardioSimple() {
       <label class="form-label">時間 (分)</label>
       <input class="form-input" type="number" step="1"    min="0" placeholder="例: 30"  id="cardio-time"     value="${cardioSession.time}" />
       <label class="form-label">メモ</label>
-      <input class="form-input" type="text" placeholder="任意" id="cardio-notes" value="${cardioSession.notes}" />
+      <input class="form-input" type="text" placeholder="任意" id="cardio-notes" value="${esc(cardioSession.notes)}" />
     </div>`;
 }
 
@@ -665,7 +795,7 @@ function renderCardioCalc() {
       <label class="form-label">速度 (km/h)</label>
       <input class="form-input" type="number" step="0.1"  min="0" placeholder="例: 10.0" id="cardio-speed"    value="${cardioSession.speed}" />
       <label class="form-label">メモ</label>
-      <input class="form-input" type="text" placeholder="任意" id="cardio-notes" value="${cardioSession.notes}" />
+      <input class="form-input" type="text" placeholder="任意" id="cardio-notes" value="${esc(cardioSession.notes)}" />
     </div>`;
 }
 
@@ -684,27 +814,30 @@ function renderCardioSprint() {
       <input class="form-input" type="number" step="1" min="1" placeholder="例: 5"
         id="cardio-sprint-count" value="${cardioSession.sprintCount}" />
       <label class="form-label">メモ</label>
-      <input class="form-input" type="text" placeholder="任意" id="cardio-notes" value="${cardioSession.notes}" />
+      <input class="form-input" type="text" placeholder="任意" id="cardio-notes" value="${esc(cardioSession.notes)}" />
     </div>`;
 }
 
-function renderCardioLogItem(l) {
+function cardioDetail(l) {
+  if (l.mode === 'sprint') return `${l.sprintDist}m × ${l.sprintCount}本`;
+  const parts = [];
+  if (l.distance) parts.push(`${l.distance}km`);
+  if (l.minutes)  parts.push(`${l.minutes}分`);
+  if (l.speed)    parts.push(`${l.speed}km/h`);
+  return parts.join(' / ');
+}
+
+function renderCardioLogItem(l, withActions = false) {
   const typeLabel = l.type === 'run' ? '🏃' : l.type === 'walk' ? '🚶' : '🚴';
-  let detail;
-  if (l.mode === 'sprint') {
-    detail = `${l.sprintDist}m × ${l.sprintCount}本`;
-  } else {
-    const parts = [];
-    if (l.distance) parts.push(`${l.distance}km`);
-    if (l.time)     parts.push(`${l.time}分`);
-    if (l.speed)    parts.push(`${l.speed}km/h`);
-    detail = parts.join(' / ');
-  }
   return `
     <div class="cardio-log-item">
       <span class="cardio-log-type">${typeLabel}</span>
-      <span class="cardio-log-detail">${detail}</span>
-      ${l.notes ? `<span class="cardio-log-notes">${l.notes}</span>` : ''}
+      <span class="cardio-log-detail">${esc(cardioDetail(l))}</span>
+      ${l.notes ? `<span class="cardio-log-notes">${esc(l.notes)}</span>` : ''}
+      ${withActions ? `
+        <button class="btn-icon" data-cardio-edit="${l.id}" title="日付・時刻を変更">✏️</button>
+        <button class="btn-icon danger" data-cardio-del="${l.id}" title="削除">🗑</button>
+      ` : ''}
     </div>`;
 }
 
@@ -730,38 +863,108 @@ function calcCardioAuto() {
 }
 
 // ── Log tab ──────────────────────────────────────────────────────
+//   日付ごとにまとめ、その中に「筋トレ何件」「有酸素何件」を並べる。
+//   1件ずつ日付・時刻の変更と削除ができる。
 function renderLog() {
-  if (logs.length === 0) return `<div class="empty">まだログがありません</div>`;
-  return logs.map(log => `
+  if (logs.length === 0 && cardioLogs.length === 0) {
+    return `<div class="empty">まだログがありません</div>`;
+  }
+
+  // logs は新しい順なので、1日の中は逆順にして「1回目」が本当に最初になるようにする
+  const days = {};
+  const day  = d => (days[d] = days[d] || { workouts: [], cardio: [] });
+  [...logs].reverse().forEach(l => day(l.date).workouts.push(l));
+  [...cardioLogs].reverse().forEach(c => day(c.date).cardio.push(c));
+  Object.values(days).forEach(d => {
+    d.workouts.sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+    d.cardio.sort((a, b) => (a.time || '').localeCompare(b.time || ''));
+  });
+
+  return Object.keys(days).sort().reverse().map(date => {
+    const d        = days[date];
+    const dayTotal = d.workouts.reduce((s, l) => s + (l.total || 0), 0);
+    return `
     <div class="log-card">
-      <div class="log-date">${log.date}</div>
+      <div class="log-date">
+        ${jpDate(date)}<span class="log-weekday">(${isoWeekday(date)})</span>
+        ${d.workouts.length > 1 ? `<span class="log-count-badge">${d.workouts.length}回</span>` : ''}
+      </div>
+      ${d.workouts.map((log, i) => renderLogSession(log, i, d.workouts.length)).join('')}
+      ${d.cardio.map(c => renderCardioLogItem(c, true)).join('')}
+      ${dayTotal > 0 ? `<div class="log-total">この日の総重量：<strong>${dayTotal.toLocaleString()} kg</strong></div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function renderLogSession(log, index, count) {
+  return `
+    <div class="log-session">
+      <div class="log-session-head">
+        <span class="log-session-time">🕐 ${log.time || '時刻なし'}</span>
+        ${count > 1 ? `<span class="log-session-nth">${index + 1}回目</span>` : ''}
+        <span class="log-session-total">${log.total.toLocaleString()} kg</span>
+        <button class="btn-icon" data-log-edit="${log.id}" title="日付・時刻を変更">✏️</button>
+        <button class="btn-icon danger" data-log-del="${log.id}" title="削除">🗑</button>
+      </div>
       ${log.entries.map(e => `
         <div class="log-entry">
-          <span class="log-entry-name">${e.name}</span>
-          <span class="log-entry-detail">${e.sets}set</span>
-          <span class="log-entry-sub">${(e.total ?? e.weight * e.sets).toLocaleString()}kg</span>
+          <span class="log-entry-name">${esc(e.name)}</span>
+          <span class="log-entry-detail">${entryWeightLabel(e)} × ${e.sets}set</span>
+          <span class="log-entry-sub">${(e.total ?? 0).toLocaleString()}kg</span>
         </div>
       `).join('')}
-      <div class="log-total">本日の総重量：<strong>${log.total.toLocaleString()} kg</strong></div>
-    </div>
-  `).join('');
+    </div>`;
+}
+
+// ── Obsidian 書き出しカード ───────────────────────────────────────
+function renderObsidianCard() {
+  return `
+    <div class="transfer-card">
+      <div class="transfer-title">🗒 Obsidian に書き出す</div>
+      <p class="transfer-desc">
+        記録を Markdown ノートとして書き出します。<br>
+        iPhone では共有シートが開くので、Obsidian の保管庫（Vault）に保存してください。
+      </p>
+      <button class="btn-obsidian" data-obsidian="all">
+        <span class="transfer-btn-icon">📦</span>一式（サマリー＋日別＋種目別・ZIP）
+      </button>
+      <button class="btn-obsidian" data-obsidian="daily">
+        <span class="transfer-btn-icon">📅</span>日別ノートだけ（ZIP）
+      </button>
+      <button class="btn-obsidian" data-obsidian="single">
+        <span class="transfer-btn-icon">📄</span>1ファイルにまとめる（.md）
+      </button>
+    </div>`;
+}
+
+// ── 複数端末同期カード（中身は sync.js が入れる）─────────────────
+function renderSyncCard() {
+  return `
+    <div class="transfer-card">
+      <div class="transfer-title">☁️ 複数端末で同期</div>
+      <div id="sync-card-body">
+        <p class="transfer-desc">同期機能を読み込めませんでした（sync.js）。</p>
+      </div>
+    </div>`;
 }
 
 // ── Stats tab ────────────────────────────────────────────────────
 function renderStats() {
-  const avg    = logs.length > 0 ? Math.round(totalWeight / logs.length) : 0;
-  const recent = [...logs].slice(0, 8).reverse();
+  const total  = totalWeight();
+  const days   = trainedDays();
+  const avg    = days > 0 ? Math.round(total / days) : 0;
+  const recent = logs.slice(0, 8).reverse();
   const maxTotal = recent.length > 0 ? Math.max(...recent.map(l=>l.total)) : 1;
 
   return `
     <div class="stat-grid">
       <div class="stat-card wide">
         <div class="stat-label">累計扱った総重量</div>
-        <div class="stat-value">${totalWeight.toLocaleString()} <span class="stat-unit">kg</span></div>
+        <div class="stat-value">${total.toLocaleString()} <span class="stat-unit">kg</span></div>
       </div>
       <div class="stat-card">
         <div class="stat-label">記録日数</div>
-        <div class="stat-value">${logs.length} <span class="stat-unit">日</span></div>
+        <div class="stat-value">${days} <span class="stat-unit">日</span></div>
       </div>
       <div class="stat-card">
         <div class="stat-label">平均 / 日</div>
@@ -774,7 +977,7 @@ function renderStats() {
         <div class="stat-label" style="margin-bottom:14px">直近セッション 総重量推移</div>
         ${recent.map(log => `
           <div class="bar-row">
-            <span class="bar-label">${log.date.replace(/\d{4}年/,'')}</span>
+            <span class="bar-label">${jpDateShort(log.date)}${log.time ? `<br>${log.time}` : ''}</span>
             <div class="bar-track">
               <div class="bar-fill" style="width:${Math.round((log.total/maxTotal)*100)}%"></div>
             </div>
@@ -783,6 +986,9 @@ function renderStats() {
         `).join('')}
       </div>
     ` : ''}
+
+    ${renderSyncCard()}
+    ${renderObsidianCard()}
 
     <div class="transfer-card">
       <div class="transfer-title">📲 機種変更・データ引き継ぎ</div>
@@ -948,11 +1154,12 @@ function bindEvents() {
 
   // ── Stats / Transfer
   document.getElementById('btn-export')?.addEventListener('click', () => {
-    const data = { exercises, logs, totalWeight, cardioLogs };
+    const data = { app: 'ironlog', version: 3, exportedAt: new Date().toISOString(),
+                   exercises, logs, cardioLogs };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
-    a.href = url; a.download = `ironlog_backup_${new Date().toISOString().slice(0,10)}.json`;
+    a.href = url; a.download = `ironlog_backup_${todayISO()}.json`;
     a.click(); URL.revokeObjectURL(url);
     showToast('⬆️ データをエクスポートしました');
   });
@@ -963,13 +1170,13 @@ function bindEvents() {
     reader.onload = (evt) => {
       try {
         const data = JSON.parse(evt.target.result);
-        if (data.exercises && data.logs && typeof data.totalWeight === 'number') {
+        // v1/v2（totalWeight を持つ旧バックアップ）も読める
+        if (Array.isArray(data.exercises) && Array.isArray(data.logs)) {
           if (!confirm('現在のデータをすべて上書きしますか？')) return;
-          exercises   = data.exercises.map(ex => ({ targetSets:3, presetWeights:[ex.weight], ...ex }));
-          logs        = data.logs;
-          totalWeight = data.totalWeight;
-          if (data.cardioLogs) cardioLogs = data.cardioLogs;
-          saveExercises(); saveLogs(); saveTotalWeight(); saveCardioLogs();
+          exercises  = data.exercises.map(ex => ({ targetSets:3, presetWeights:[ex.weight], ...ex }));
+          logs       = sortByDate(migrateLogs(data.logs));
+          cardioLogs = sortByDate(migrateCardio(data.cardioLogs || []));
+          saveExercises(); saveLogs(); saveCardioLogs();
           showToast('⬇️ データをインポートしました'); render();
         } else { showToast('⚠️ 無効なファイル形式です'); }
       } catch { showToast('⚠️ ファイルの読み込みに失敗しました'); }
@@ -980,13 +1187,50 @@ function bindEvents() {
   document.getElementById('btn-delete-all')?.addEventListener('click', () => {
     if (!confirm('全データを削除しますか？この操作は取り消せません。')) return;
     if (!confirm('本当に削除しますか？ログ・種目・すべてのデータが消えます。')) return;
-    exercises = []; logs = []; totalWeight = 0; cardioLogs = []; session = {};
-    saveExercises(); saveLogs(); saveTotalWeight(); saveCardioLogs(); saveSession();
+    exercises = []; logs = []; cardioLogs = []; session = {}; sessionMeta = {};
+    saveExercises(); saveLogs(); saveCardioLogs(); saveSession(); saveSessionMeta();
     showToast('🗑 全データを削除しました'); render();
+  });
+
+  // ── 日付をまたいだ記録を「今日」に付け替える
+  document.getElementById('btn-carryover-today')?.addEventListener('click', () => {
+    sessionMeta.date = todayISO(); saveSessionMeta();
+    showToast('📅 今日の記録として保存します'); render();
   });
 
   // ── Content-level delegation (single handler)
   content.addEventListener('click', (e) => {
+    // ログの日付変更 / 削除
+    const logEditBtn = e.target.closest('[data-log-edit]');
+    if (logEditBtn) { openLogEditModal('workout', logEditBtn.dataset.logEdit); return; }
+
+    const logDelBtn = e.target.closest('[data-log-del]');
+    if (logDelBtn) {
+      const id = logDelBtn.dataset.logDel;
+      if (!confirm('この記録を削除しますか？この操作は取り消せません。')) return;
+      logs = logs.filter(x => String(x.id) !== String(id));
+      saveLogs(); showToast('🗑 記録を削除しました'); render(); return;
+    }
+
+    const cardioEditBtn = e.target.closest('[data-cardio-edit]');
+    if (cardioEditBtn) { openLogEditModal('cardio', cardioEditBtn.dataset.cardioEdit); return; }
+
+    const cardioDelBtn = e.target.closest('[data-cardio-del]');
+    if (cardioDelBtn) {
+      const id = cardioDelBtn.dataset.cardioDel;
+      if (!confirm('この有酸素の記録を削除しますか？')) return;
+      cardioLogs = cardioLogs.filter(x => String(x.id) !== String(id));
+      saveCardioLogs(); showToast('🗑 記録を削除しました'); render(); return;
+    }
+
+    // Obsidian 書き出し（obsidian.js）
+    const obsBtn = e.target.closest('[data-obsidian]');
+    if (obsBtn) {
+      if (typeof exportObsidian !== 'function') { showToast('⚠️ obsidian.js を読み込めていません'); return; }
+      exportObsidian(obsBtn.dataset.obsidian);
+      return;
+    }
+
     // Audio option
     const audioOptBtn = e.target.closest('[data-audio-opt]');
     if (audioOptBtn) {
@@ -1079,6 +1323,8 @@ function bindEvents() {
       const id = +setTapBtn.dataset.setTap;
       const ex = exercises.find(x => x.id === id); if (!ex) return;
       if (!session[id]) session[id] = { sets: [], open: true };
+      // 最初の1セット目でその日を確定させる（日付をまたいでも記録が動かないように）
+      if (!sessionMeta.date) { sessionMeta.date = todayISO(); saveSessionMeta(); }
       session[id].sets.push({ time: nowHHMM(), weight: ex.weight });
 
       const rect   = setTapBtn.getBoundingClientRect();
@@ -1194,17 +1440,7 @@ function renderExList() {
   if (previewEntries.length === 0) {
     existing?.remove();
   } else {
-    const html = `
-      <div class="save-preview-card">
-        <div class="save-preview-title">📋 今回の記録プレビュー</div>
-        ${previewEntries.map(e => `
-          <div class="save-preview-row">
-            <span class="save-preview-name">${e.name}</span>
-            <span class="save-preview-sets">${e.sets} set</span>
-            <span class="save-preview-total">${e.total.toLocaleString()} kg</span>
-          </div>
-        `).join('')}
-      </div>`;
+    const html = renderPreviewCard(previewEntries);
     if (existing) {
       existing.outerHTML = html;
     } else if (btnSave) {
@@ -1216,44 +1452,107 @@ function renderExList() {
 }
 
 // ── Save log ─────────────────────────────────────────────────────
+//   同じ日の記録があっても上書きしない。1日に何件でも積める。
 function saveLog() {
-  const entries = exercises
-    .map(ex => {
-      const s = session[ex.id];
-      if (!s || s.sets.length === 0) return null;
-      const total = s.sets.reduce((sum, st) => sum + (st.weight ?? ex.weight), 0);
-      return { name: ex.name, sets: s.sets.length, total };
-    })
-    .filter(Boolean);
-
+  const entries = buildPreviewEntries();
   if (entries.length === 0) { showToast('⚠️ セット完了の種目がありません'); return; }
 
   const dayTotal = entries.reduce((sum, e) => sum + e.total, 0);
-  logs = [{ date: todayStr(), entries, total: dayTotal }, ...logs.filter(l => l.date !== todayStr())];
-  totalWeight += dayTotal;
-  saveLogs(); saveTotalWeight();
+  const date     = sessionMeta.date || todayISO();
+
+  logs.unshift({ id: newId(), date, time: nowHHMM(), entries, total: dayTotal });
+  saveLogs();
+
+  const nth = logs.filter(l => l.date === date).length;
 
   session = {}; saveSession();
+  sessionMeta = {}; saveSessionMeta();
   Object.keys(timerIntervals).forEach(k => clearInterval(timerIntervals[k]));
-  showToast(`✅ 保存完了！本日の総重量 ${dayTotal.toLocaleString()} kg`);
+  showToast(nth > 1
+    ? `✅ ${jpDate(date)} の${nth}件目として保存（${dayTotal.toLocaleString()} kg）`
+    : `✅ 保存完了！総重量 ${dayTotal.toLocaleString()} kg`);
   render();
+}
+
+// ── ログの日付・時刻を変更する / 削除する ─────────────────────────
+function openLogEditModal(kind, id) {
+  const list = kind === 'cardio' ? cardioLogs : logs;
+  const item = list.find(x => String(x.id) === String(id));
+  if (!item) return;
+
+  const label = kind === 'cardio'
+    ? `${cardioDetail(item)}${item.notes ? '（' + item.notes + '）' : ''}`
+    : item.entries.map(e => `${e.name} ${e.sets}set`).join('　');
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal-sheet">
+      <div class="modal-pill"></div>
+      <div class="modal-title">記録の日付を変更</div>
+      <div class="log-edit-summary">${esc(label)}</div>
+
+      <label class="form-label">日付</label>
+      <input class="form-input" id="log-edit-date" type="date" value="${item.date}" />
+
+      <label class="form-label">時刻</label>
+      <input class="form-input" id="log-edit-time" type="time" value="${item.time || ''}" />
+
+      <div class="modal-btn-row">
+        <button class="btn-cancel" id="log-edit-cancel">キャンセル</button>
+        <button class="btn-confirm" id="log-edit-save">保存</button>
+      </div>
+      <button class="btn-delete-all" id="log-edit-delete" style="margin-top:12px">
+        <span class="transfer-btn-icon">🗑</span>この記録を削除
+      </button>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  overlay.querySelector('#log-edit-cancel').addEventListener('click', () => overlay.remove());
+
+  overlay.querySelector('#log-edit-save').addEventListener('click', () => {
+    const date = overlay.querySelector('#log-edit-date').value;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { showToast('⚠️ 日付を選んでください'); return; }
+    item.date = date;
+    item.time = overlay.querySelector('#log-edit-time').value || '';
+    if (kind === 'cardio') saveCardioLogs(); else saveLogs();
+    overlay.remove();
+    showToast(`📅 ${jpDate(date)} に変更しました`);
+    render();
+  });
+
+  overlay.querySelector('#log-edit-delete').addEventListener('click', () => {
+    if (!confirm('この記録を削除しますか？この操作は取り消せません。')) return;
+    if (kind === 'cardio') {
+      cardioLogs = cardioLogs.filter(x => String(x.id) !== String(id));
+      saveCardioLogs();
+    } else {
+      logs = logs.filter(x => String(x.id) !== String(id));
+      saveLogs();
+    }
+    overlay.remove();
+    showToast('🗑 記録を削除しました');
+    render();
+  });
 }
 
 // ── Save cardio ──────────────────────────────────────────────────
 function saveCardio() {
   const notes = document.getElementById('cardio-notes')?.value || '';
+  const stamp = { id: newId(), date: todayISO(), time: nowHHMM() };
 
   if (cardioMode === 'sprint') {
     const sprintDist  = parseFloat(document.getElementById('cardio-sprint-dist')?.value) || cardioSession.sprintDist;
     const sprintCount = parseInt(document.getElementById('cardio-sprint-count')?.value);
     if (!sprintCount || sprintCount <= 0) { showToast('⚠️ 本数を入力してください'); return; }
-    cardioLogs.unshift({ date: todayStr(), mode: 'sprint', type: cardioSession.type, sprintDist, sprintCount, notes });
+    cardioLogs.unshift({ ...stamp, mode: 'sprint', type: cardioSession.type, sprintDist, sprintCount, notes });
   } else {
     const distance = parseFloat(document.getElementById('cardio-distance')?.value) || 0;
-    const time     = parseFloat(document.getElementById('cardio-time')?.value)     || 0;
+    const minutes  = parseFloat(document.getElementById('cardio-time')?.value)     || 0;
     const speed    = parseFloat(document.getElementById('cardio-speed')?.value)    || 0;
-    if (!distance && !time && !speed) { showToast('⚠️ 少なくとも1つ入力してください'); return; }
-    cardioLogs.unshift({ date: todayStr(), mode: cardioMode, type: cardioSession.type, distance, time, speed, notes });
+    if (!distance && !minutes && !speed) { showToast('⚠️ 少なくとも1つ入力してください'); return; }
+    cardioLogs.unshift({ ...stamp, mode: cardioMode, type: cardioSession.type, distance, minutes, speed, notes });
   }
 
   saveCardioLogs();
@@ -1283,7 +1582,7 @@ function openModal(ex = null) {
       <label class="form-label">種目名</label>
       <div class="name-input-row">
         <input class="form-input${isEdit ? ' name-locked' : ''}" id="modal-name" type="text"
-          value="${isEdit ? ex.name : ''}" placeholder="例：ベンチプレス"
+          value="${isEdit ? esc(ex.name) : ''}" placeholder="例：ベンチプレス"
           ${isEdit ? 'readonly' : ''} style="margin-bottom:0;flex:1" />
         ${isEdit ? `<button class="btn-name-unlock" id="btn-name-unlock">✏️ 変更</button>` : ''}
       </div>
@@ -1404,6 +1703,25 @@ document.addEventListener('visibilitychange', () => {
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js'); });
 }
+
+// ================================================================
+//  外部モジュール用の窓口（obsidian.js / sync.js から使う）
+//  app.js の state は let 宣言なので window から直接は触れない。
+//  読み書きはすべてここを通す。
+// ================================================================
+window.IRONLOG = {
+  getExercises:  () => exercises,
+  getLogs:       () => logs,
+  getCardioLogs: () => cardioLogs,
+
+  setExercises(v)  { exercises  = v || [];                          DB.set('exercises', exercises); },
+  setLogs(v)       { logs       = sortByDate(migrateLogs(v || [])); DB.set('logs', logs); },
+  setCardioLogs(v) { cardioLogs = sortByDate(migrateCardio(v||[])); DB.set('cardioLogs', cardioLogs); },
+
+  rerender: () => render(),
+  helpers:  { esc, uid, newId, todayISO, jpDate, jpDateShort, isoWeekday,
+              totalWeight, trainedDays, entryWeightLabel, cardioDetail, showToast },
+};
 
 // ================================================================
 //  INIT
