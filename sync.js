@@ -123,6 +123,18 @@ async function _rest(path, { method = 'GET', body = null, prefer = null } = {}) 
   return method === 'GET' ? res.json() : null;
 }
 
+// 1回のGETには件数上限があるので、全部取れるまでページを送る。
+// ログは続けるほど増えるので、ここが無いと 1000 件を超えたぶんが静かに落ちる
+// （エラーにならないので気づけない）。
+async function _restAll(path) {
+  const out = [];
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const page = await _rest(`${path}&limit=${PAGE_SIZE}&offset=${offset}`);
+    out.push(...page);
+    if (page.length < PAGE_SIZE) return out;
+  }
+}
+
 /* ── 変更検出 ─────────────────────────────────────────────────────────── */
 /* JSON全体を控えると重いので、短いハッシュで「変わったか」だけ見る */
 function _hash(str) {
@@ -138,9 +150,17 @@ function _hash(str) {
 function _loadSyncState() {
   try {
     const s = JSON.parse(localStorage.getItem(SYNC_STATE_KEY) || 'null');
-    if (s && typeof s === 'object') return s;
+    if (s && typeof s === 'object') {
+      // 2026-08-06: updated_at を端末の時計からサーバー時刻に切り替えた。
+      // 切り替え前の lastPulledAt はずれた時計で書かれた値なので、
+      // そのまま基準にすると（時計が進んでいた端末では）何も取れなくなる。
+      // 1度だけ全件取り直させる。
+      if (!s.serverTimeMigrated) { s.lastPulledAt = null; s.serverTimeMigrated = true; }
+      return s;
+    }
   } catch {}
-  return { lastPulledAt: null, logs: {}, cardio: {}, exHash: null, exAt: 0, touched: {} };
+  return { lastPulledAt: null, logs: {}, cardio: {}, exHash: null, exAt: 0,
+           touched: {}, serverTimeMigrated: true };
 }
 function _saveSyncState(s) {
   try { localStorage.setItem(SYNC_STATE_KEY, JSON.stringify(s)); } catch {}
@@ -187,8 +207,8 @@ async function _pull(state) {
   const since = state.lastPulledAt ? `&updated_at=gt.${encodeURIComponent(state.lastPulledAt)}` : '';
   const [stateRows, logRows, cardioRows] = await Promise.all([
     _rest('ironlog_state?select=doc,updated_at&limit=1'),
-    _rest(`ironlog_logs?select=id,date,clock,entries,total,updated_at,deleted${since}`),
-    _rest(`ironlog_cardio?select=id,date,clock,data,updated_at,deleted${since}`),
+    _restAll(`ironlog_logs?select=id,date,clock,entries,total,updated_at,deleted&order=updated_at.asc,id.asc${since}`),
+    _restAll(`ironlog_cardio?select=id,date,clock,data,updated_at,deleted&order=updated_at.asc,id.asc${since}`),
   ]);
 
   let newest = state.lastPulledAt;
@@ -266,7 +286,8 @@ async function _pull(state) {
     window.IRONLOG.setCardioLogs(list);
   }
 
-  state.lastPulledAt = newest;
+  // commit の順と now() のわずかなズレで取りこぼさないよう、少しだけ巻き戻す
+  if (newest) state.lastPulledAt = new Date(Date.parse(newest) - PULL_MARGIN_MS).toISOString();
   return changed;
 }
 
@@ -283,7 +304,6 @@ function _rowToLog(r) {
 async function _push(state) {
   const userId = (sbLoadSession() || {}).user_id;
   if (!userId) throw new Error('ユーザーIDが取れません');
-  const now = () => new Date().toISOString();
 
   /* --- 種目リスト --- */
   const exercises = window.IRONLOG.getExercises();
@@ -292,7 +312,8 @@ async function _push(state) {
     await _rest('ironlog_state?on_conflict=user_id', {
       method: 'POST',
       prefer: 'resolution=merge-duplicates,return=minimal',
-      body: [{ user_id: userId, doc: { exercises }, updated_at: now() }],
+      // updated_at は送らない。サーバー側のトリガが now() を入れる。
+      body: [{ user_id: userId, doc: { exercises } }],
     });
     state.exHash = exHash;
     state.exAt   = Date.now();
@@ -308,12 +329,12 @@ async function _push(state) {
     const r = _logRow(l);
     if (state.logs[id] === _hash(JSON.stringify(r))) return;
     rows.push({ user_id: userId, id, date: r.date, clock: r.time,
-                entries: r.entries, total: r.total, updated_at: now(), deleted: false });
+                entries: r.entries, total: r.total, deleted: false });
   });
   Object.keys(state.logs).forEach(id => {
     if (seen.has(id)) return;   // ローカルで消えた＝他端末にも削除を伝える
     rows.push({ user_id: userId, id, date: '1970-01-01', clock: '', entries: [], total: 0,
-                updated_at: now(), deleted: true });
+                deleted: true });
   });
   for (let i = 0; i < rows.length; i += 200) {
     await _rest('ironlog_logs?on_conflict=user_id,id', {
@@ -337,12 +358,12 @@ async function _push(state) {
     if (state.cardio[id] === _hash(JSON.stringify(c))) return;
     const { id: _i, date: _d, time: _t, ...rest } = c;
     cRows.push({ user_id: userId, id, date: c.date, clock: c.time || '', data: rest,
-                 updated_at: now(), deleted: false });
+                 deleted: false });
   });
   Object.keys(state.cardio).forEach(id => {
     if (cSeen.has(id)) return;
     cRows.push({ user_id: userId, id, date: '1970-01-01', clock: '', data: {},
-                 updated_at: now(), deleted: true });
+                 deleted: true });
   });
   for (let i = 0; i < cRows.length; i += 200) {
     await _rest('ironlog_cardio?on_conflict=user_id,id', {

@@ -46,6 +46,30 @@ create table if not exists public.ironlog_cardio (
 create index if not exists ironlog_cardio_user_updated_idx
   on public.ironlog_cardio (user_id, updated_at desc);
 
+-- ── 4) updated_at をサーバー時刻で入れる（2026-08-06 追加） ──
+-- 端末の時計で updated_at を入れると、時計がずれた端末の行が
+-- 「前回より新しい行だけ取る」差分同期の網から永久に漏れる。
+-- PCの時刻同期が切れているとログが片方の端末に届かなくなるので、
+-- サーバーの now() に統一する。sync.js 側からは updated_at を送らない。
+create or replace function public.set_updated_at()
+returns trigger language plpgsql as $$
+begin
+  new.updated_at = now();
+  return new;
+end $$;
+
+drop trigger if exists ironlog_state_touch  on public.ironlog_state;
+create trigger ironlog_state_touch  before insert or update on public.ironlog_state
+  for each row execute function public.set_updated_at();
+
+drop trigger if exists ironlog_logs_touch   on public.ironlog_logs;
+create trigger ironlog_logs_touch   before insert or update on public.ironlog_logs
+  for each row execute function public.set_updated_at();
+
+drop trigger if exists ironlog_cardio_touch on public.ironlog_cardio;
+create trigger ironlog_cardio_touch before insert or update on public.ironlog_cardio
+  for each row execute function public.set_updated_at();
+
 -- ── RLS ──
 alter table public.ironlog_state  enable row level security;
 alter table public.ironlog_logs   enable row level security;
