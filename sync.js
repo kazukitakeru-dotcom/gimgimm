@@ -17,12 +17,24 @@ const SB_URL = 'https://kafaarlosuvqxxlxpvgg.supabase.co';
 /* publishable key は公開前提のもの。これ単体では何も読めない（anon は revoke 済み）。 */
 const SB_KEY = 'sb_publishable_nSwOQo-YbEtDN_KTjBf80w_D6o0iLoA';
 
-const SESSION_KEY    = 'ironlog_session_v1';
+// ログイン状態は6アプリで共通。同じオリジンなので localStorage を共有できる。
+// キーを分けていたせいで、アプリの数だけログインが必要になっていた。
+const SESSION_KEY    = 'sb_session_v1';
+const LEGACY_SESSION_KEY = 'ironlog_session_v1';
 const SYNC_STATE_KEY = 'ironlog_sync_state_v1';
 
 /* ── セッション ───────────────────────────────────────────────────────── */
 function sbLoadSession() {
-  try { return JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch { return null; }
+  try {
+    let raw = localStorage.getItem(SESSION_KEY);
+    // 旧キー（アプリごとに分かれていた頃のもの）からの引き継ぎ。
+    // これがあるので、共通化のためにログインし直す必要はない。
+    if (!raw) {
+      const old = localStorage.getItem(LEGACY_SESSION_KEY);
+      if (old) { localStorage.setItem(SESSION_KEY, old); raw = old; }
+    }
+    return JSON.parse(raw || 'null');
+  } catch (e) { return null; }
 }
 function sbSaveSession(s) {
   if (s) localStorage.setItem(SESSION_KEY, JSON.stringify(s));
@@ -446,7 +458,7 @@ function updateSyncUI() {
 
   document.getElementById('sync-now-btn').addEventListener('click', () => syncNow({ toast: true }));
   document.getElementById('sync-logout-btn').addEventListener('click', () => {
-    if (!confirm('ログアウトします。この端末のデータはそのまま残ります。よろしいですか？')) return;
+    if (!confirm('ログアウトします。ログインを共有している他のアプリもログアウトになります。\nこの端末のデータはそのまま残ります。よろしいですか？')) return;
     sbSignOut();
     updateSyncUI();
     window.IRONLOG.helpers.showToast('ログアウトしました');
