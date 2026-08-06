@@ -100,6 +100,11 @@ async function sbAccessToken() {
   }
 }
 
+/* サーバー時刻でも「commit の順番」と now() は完全には一致しないので、
+   前回取得位置を少しだけ巻き戻して取りこぼしを防ぐ。重複して取っても害はない。 */
+const PULL_MARGIN_MS = 5000;
+const PAGE_SIZE = 1000; /* PostgREST の1回あたり上限に合わせる */
+
 /* ── PostgREST ────────────────────────────────────────────────────────── */
 async function _rest(path, { method = 'GET', body = null, prefer = null } = {}) {
   const token = await sbAccessToken();
