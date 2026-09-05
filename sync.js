@@ -42,6 +42,17 @@ function sbSaveSession(s) {
 }
 function sbIsLoggedIn() { return !!(sbLoadSession() || {}).refresh_token; }
 
+/* 最後にログインしたメールアドレス。ログイン欄にあらかじめ入れておくためだけのもので、
+   パスワードは持たない（パスワードは端末のパスワード保存に任せる）。
+   キーは他アプリと共通なので、どれか1つで入れれば他アプリの欄にも入っている。 */
+const LAST_EMAIL_KEY = 'sb_last_email';
+function lastLoginEmail() {
+  return (sbLoadSession() || {}).email || localStorage.getItem(LAST_EMAIL_KEY) || '';
+}
+function rememberLoginEmail(email) {
+  try { localStorage.setItem(LAST_EMAIL_KEY, email); } catch (e) {}
+}
+
 function _storeSession(json) {
   if (!json || !json.access_token) return null;
   const prev = sbLoadSession() || {};
@@ -79,7 +90,13 @@ async function _authFetch(path, body) {
     });
   } catch { throw new Error('ネットワークに接続できません'); }
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(sbMessage(json.error_description || json.msg || json.message || `HTTP ${res.status}`));
+  if (!res.ok) {
+    // 「サーバーに断られた」のか「そもそも届かなかった」のかを呼び出し側が区別できるように
+    // status を付ける。混同するとオフラインなだけでログイン情報を捨ててしまう。
+    const err = new Error(sbMessage(json.error_description || json.msg || json.message || `HTTP ${res.status}`));
+    err.status = res.status;
+    throw err;
+  }
   return json;
 }
 
@@ -99,15 +116,42 @@ function sbSignOut() {
   localStorage.removeItem(SYNC_STATE_KEY);
 }
 
+/* 有効なアクセストークンを返す（期限が近ければ更新する）
+
+   リフレッシュトークンは1回使うとサーバー側で作り替えられ、古いものはその場で無効になる。
+   同期は複数のテーブルを Promise.all で同時に取りに行くので、何もしないと
+   各リクエストが同時に「期限が切れているから更新しよう」と判断して同じトークンを何度も使い、
+   1本だけ成功して残りは「Invalid Refresh Token: Already Used」で弾かれる。
+   それを失効と誤解してログイン情報を消していたため、
+   アクセストークンの寿命（1時間）を超えて間を空けるたびにログインし直しになっていた。
+   _refreshing で更新は常に1本にまとめ、後続はその結果に相乗りする。 */
+let _refreshing = null;
+
 async function sbAccessToken() {
   const s = sbLoadSession();
   if (!s || !s.refresh_token) return null;
   if (s.access_token && Date.now() < s.expires_at - 60000) return s.access_token;
+  if (!_refreshing) {
+    _refreshing = _sbRefresh(s.refresh_token).finally(() => { _refreshing = null; });
+  }
+  return _refreshing;
+}
+
+async function _sbRefresh(used) {
   try {
-    const json = await _authFetch('token?grant_type=refresh_token', { refresh_token: s.refresh_token });
+    const json = await _authFetch('token?grant_type=refresh_token', { refresh_token: used });
     return _storeSession(json).access_token;
   } catch (e) {
-    if (/invalid|expired|not found/i.test(e.message)) sbSaveSession(null);
+    // 同じオリジンの別アプリ／別タブが先に更新していた場合、保存先には既に新しいものが入っている。
+    // これは失効ではないので、ログイン情報は捨てずに新しいほうで1回だけやり直す。
+    const now = sbLoadSession();
+    if (now && now.refresh_token && now.refresh_token !== used) {
+      if (now.access_token && Date.now() < now.expires_at - 60000) return now.access_token;
+      const json = await _authFetch('token?grant_type=refresh_token', { refresh_token: now.refresh_token });
+      return _storeSession(json).access_token;
+    }
+    // サーバーがはっきり断ったときだけログインし直し。通信エラー（status 無し）では捨てない。
+    if (e.status === 400 || e.status === 401) sbSaveSession(null);
     throw e;
   }
 }
@@ -476,22 +520,28 @@ function openSyncLogin() {
         初めての端末では「新規登録」を、2台目以降は同じメールアドレスで「ログイン」を選んでください。
       </p>
 
-      <label class="form-label">メールアドレス</label>
-      <input class="form-input" id="sync-email" type="email" autocomplete="username"
-             inputmode="email" placeholder="you@example.com"
-             value="${window.IRONLOG.helpers.esc((sbLoadSession() || {}).email || '')}" />
+      <!-- 入力欄は必ず form の中に置くこと。
+           iPhone / Mac のパスワード保存（iCloudキーチェーン）は submit を合図に
+           「保存しますか？」を出すので、フォームでないと候補として出てこない。
+           ログインだけ type="submit"、他は type="button" にする。 -->
+      <form id="sync-login-form" autocomplete="on" style="margin:0">
+        <label class="form-label">メールアドレス</label>
+        <input class="form-input" id="sync-email" name="email" type="email" autocomplete="username"
+               inputmode="email" placeholder="you@example.com"
+               value="${window.IRONLOG.helpers.esc(lastLoginEmail())}" />
 
-      <label class="form-label">パスワード</label>
-      <input class="form-input" id="sync-password" type="password" autocomplete="current-password"
-             placeholder="8文字以上" />
+        <label class="form-label">パスワード</label>
+        <input class="form-input" id="sync-password" name="password" type="password" autocomplete="current-password"
+               placeholder="8文字以上" />
 
-      <div class="sync-login-msg" id="sync-login-msg"></div>
+        <div class="sync-login-msg" id="sync-login-msg"></div>
 
-      <div class="modal-btn-row">
-        <button class="btn-cancel"  id="sync-signup">新規登録</button>
-        <button class="btn-confirm" id="sync-signin">ログイン</button>
-      </div>
-      <button class="btn-cancel" id="sync-close" style="width:100%;margin-top:10px">閉じる</button>
+        <div class="modal-btn-row">
+          <button class="btn-cancel"  id="sync-signup" type="button">新規登録</button>
+          <button class="btn-confirm" id="sync-signin" type="submit">ログイン</button>
+        </div>
+        <button class="btn-cancel" id="sync-close" style="width:100%;margin-top:10px" type="button">閉じる</button>
+      </form>
     </div>`;
   document.body.appendChild(overlay);
 
@@ -515,6 +565,7 @@ function openSyncLogin() {
       } else {
         await sbSignIn(email, password);
       }
+      rememberLoginEmail(email);
       overlay.remove();
       updateSyncUI();
       await syncNow({ toast: true });
@@ -524,7 +575,11 @@ function openSyncLogin() {
   };
 
   overlay.querySelector('#sync-signup').addEventListener('click', () => submit('signup'));
-  overlay.querySelector('#sync-signin').addEventListener('click', () => submit('signin'));
+  // ログインは click ではなく submit で受ける（そうしないとパスワード保存の候補に載らない）
+  overlay.querySelector('#sync-login-form').addEventListener('submit', e => {
+    e.preventDefault();
+    submit('signin');
+  });
 }
 
 /* ── 同期のきっかけ ───────────────────────────────────────────────────── */
