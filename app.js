@@ -76,6 +76,9 @@ let exercises = DB.get('exercises', [
 exercises = exercises.map(ex => ({
   targetSets: 3,
   presetWeights: ex.presetWeights || [ex.weight],
+  restSec: null,        // null = 共通のレスト時間を使う
+  bodyweight: false,    // 自重を加算するか（懸垂・腕立てなど）
+  bwRatio: 100,         // 体重にかける割合(%)
   ...ex
 }));
 
@@ -99,6 +102,18 @@ DB.set('cardioLogs', cardioLogs);
 let session = {};
 // 記録を始めた日付。日付をまたいでも「始めた日」の記録として保存するために持つ
 let sessionMeta = DB.get('sessionMeta_v1', {});
+// startDate = 記録を始めた日（変わらない） / date = 保存先として選んだ日
+// 旧データは date しか持っていないので、それを開始日として引き継ぐ
+if (sessionMeta.date && !sessionMeta.startDate) sessionMeta.startDate = sessionMeta.date;
+
+// ── 設定（体重・レストタイマーの既定値） ──────────────────────────
+//   種目ごとの上書きは exercise 側（restSec / bodyweight / bwRatio）が持つ。
+//   ここは全種目に共通のデフォルトだけを持つ。
+let settings = Object.assign(
+  { bodyWeight: 0, defaultRestSec: 90, customRestSec: null },
+  DB.get('settings_v1', {})
+);
+function saveSettings() { DB.set('settings_v1', settings); }
 
 function initSession() {
   const saved = DB.get('session_v2', {});
@@ -298,6 +313,30 @@ function notifySaved(kind) {
   try { if (window.onIronLogSaved) window.onIronLogSaved(kind); } catch {}
 }
 
+// ── 自重を含む実効重量 ───────────────────────────────────────────
+//   自重ONの種目は「体重×割合 ＋ 追加のオモリ」が1セットで扱う重量になる。
+//   記録時の値をセットごとに保存するので、あとで体重を変えても過去の記録は動かない。
+function bodyweightPart(ex) {
+  if (!ex || !ex.bodyweight) return 0;
+  return Math.round((settings.bodyWeight || 0) * ((ex.bwRatio ?? 100) / 100) * 10) / 10;
+}
+function effectiveWeight(ex) {
+  if (!ex) return 0;
+  return Math.round((bodyweightPart(ex) + (ex.weight || 0)) * 10) / 10;
+}
+function weightBreakdown(ex) {
+  if (!ex || !ex.bodyweight) return '';
+  const add = ex.weight || 0;
+  return `自重${settings.bodyWeight || 0}kg×${ex.bwRatio ?? 100}%${add ? ` ＋ ${add}kg` : ''}`;
+}
+
+// ── レスト時間 ───────────────────────────────────────────────────
+const REST_PRESETS = [60, 90, 120, 180];
+function restSecFor(ex) {
+  return (ex && typeof ex.restSec === 'number') ? ex.restSec : (settings.defaultRestSec || 90);
+}
+function clampRest(v) { return Math.max(5, Math.min(3600, Math.round(+v || 0))); }
+
 // 1件の種目の「60kg × 3set」表示。セットごとに重量が違う場合は範囲で出す
 function entryWeightLabel(e) {
   const ws = (e.setList || []).map(s => s.weight).filter(w => typeof w === 'number');
@@ -416,12 +455,23 @@ function renderWorkout() {
   const previewEntries = buildPreviewEntries();
   const previewHtml = renderPreviewCard(previewEntries);
 
-  // 日付をまたいで記録が残っている場合の注意書き
-  const carryOver = (previewEntries.length > 0 && sessionMeta.date && sessionMeta.date !== todayISO())
+  // 日付をまたいで記録が残っている場合。どちらの日付で保存するか選べるようにする
+  const mdw       = iso => `${jpDate(iso).replace(/^\d+年/, '')}(${isoWeekday(iso)})`;
+  const startDate = sessionMeta.startDate || sessionMeta.date;
+  const saveDate  = sessionMeta.date || todayISO();
+  const today     = todayISO();
+
+  const carryOver = (previewEntries.length > 0 && startDate && startDate !== today)
     ? `<div class="carryover-note">
-         ⚠️ <strong>${jpDate(sessionMeta.date)}</strong> に始めた記録が残っています。<br>
-         このまま保存するとその日の記録になります。
-         <button class="btn-carryover-today" id="btn-carryover-today">今日の記録にする</button>
+         ⚠️ この記録は <strong>${mdw(startDate)}</strong> に始めたものです。どちらの日付で保存しますか？
+         <div class="carryover-choice">
+           <button class="btn-carryover${saveDate === startDate ? ' selected' : ''}" data-carryover-date="${startDate}">
+             ${mdw(startDate)}<span class="btn-carryover-sub">始めた日</span>
+           </button>
+           <button class="btn-carryover${saveDate === today ? ' selected' : ''}" data-carryover-date="${today}">
+             ${mdw(today)}<span class="btn-carryover-sub">今日</span>
+           </button>
+         </div>
        </div>`
     : '';
 
@@ -437,7 +487,9 @@ function renderWorkout() {
       ${exercises.map((ex, idx) => renderExCard(ex, idx)).join('')}
     </div>
     ${previewHtml}
-    <button class="btn-save-log" id="btn-save-log">💾 今日のログを保存</button>
+    <button class="btn-save-log" id="btn-save-log">
+      💾 ${saveDate === today ? '今日' : mdw(saveDate)}のログを保存
+    </button>
   `;
 }
 
@@ -446,7 +498,7 @@ function buildPreviewEntries() {
     .map(ex => {
       const s = session[ex.id];
       if (!s || s.sets.length === 0) return null;
-      const setList = s.sets.map(st => ({ time: st.time, weight: st.weight ?? ex.weight }));
+      const setList = s.sets.map(st => ({ time: st.time, weight: st.weight ?? effectiveWeight(ex) }));
       const total   = setList.reduce((sum, st) => sum + st.weight, 0);
       return { exId: ex.id, name: ex.name, sets: setList.length, total, setList };
     })
@@ -464,7 +516,10 @@ function renderExCard(ex, index) {
       <div class="ex-info">
         <div class="ex-name">${esc(ex.name)}</div>
         <div class="ex-header-bottom">
-          <div class="ex-weight">${ex.weight} kg</div>
+          <div class="ex-weight">
+            ${effectiveWeight(ex)} kg
+            ${ex.bodyweight ? `<span class="ex-weight-sub">${esc(weightBreakdown(ex))}</span>` : ''}
+          </div>
           <div class="ex-gauge-wrap">${renderGauge(setCount, target)}</div>
         </div>
       </div>
@@ -494,7 +549,7 @@ function renderExCard(ex, index) {
             <div class="set-history-row">
               <span class="set-history-num">Set ${i+1}</span>
               <span class="set-history-time">${s.time}</span>
-              <span class="set-history-weight">${s.weight ?? ex.weight}kg</span>
+              <span class="set-history-weight">${s.weight ?? effectiveWeight(ex)}kg</span>
               ${i === setCount-1 ? (sess.undoPending
                 ? `<button class="btn-undo-confirm" data-undo="${ex.id}" data-confirm="true">本当に？</button>`
                 : `<button class="btn-undo-single" data-undo="${ex.id}">↩ 取消</button>`
@@ -516,8 +571,11 @@ function renderExCard(ex, index) {
 }
 
 // ── Timer renderer ───────────────────────────────────────────────
+//   秒数は種目に保存される（ex.restSec）。指定がなければ共通の既定値を使う。
+//   計測中に秒数を変えても止まらない。経過時間はそのままで残りだけが増減する。
 function renderTimer(exId, sess) {
-  const t = sess.timer || { mode: 'countdown', preset: 90, cur: 90, running: false };
+  const ex = exercises.find(x => x.id === exId);
+  const t  = sess.timer || { mode: 'countdown', preset: restSecFor(ex), cur: restSecFor(ex), running: false };
 
   let displaySec;
   if (t.running && t.startEpoch) {
@@ -531,7 +589,9 @@ function renderTimer(exId, sess) {
     : t.mode === 'countdown' ? (displaySec <= 10 ? 'warning' : 'running-countdown')
     : 'running-stopwatch';
 
-  const PRESETS = [60, 90, 120, 180];
+  const activeSec = t.preset ?? restSecFor(ex);
+  const isCustom  = !REST_PRESETS.includes(activeSec);
+  const perEx     = ex && typeof ex.restSec === 'number';
 
   return `
     <div class="timer-mode-toggle">
@@ -545,23 +605,33 @@ function renderTimer(exId, sess) {
 
     ${t.mode==='countdown' ? `
     <div class="timer-presets">
-      ${PRESETS.map(p => `
-        <button class="btn-preset${t.preset===p?' selected':''}" data-timer-preset="${exId}" data-sec="${p}">
+      ${REST_PRESETS.map(p => `
+        <button class="btn-preset${activeSec===p?' selected':''}" data-timer-preset="${exId}" data-sec="${p}">
           ${p}秒
         </button>
       `).join('')}
+      <button class="btn-preset${isCustom?' selected':''}" data-timer-custom-open="${exId}">
+        ${isCustom ? `${activeSec}秒 ✏️` : 'その他'}
+      </button>
     </div>
-    <div class="timer-custom-row">
-      <span>カスタム</span>
-      <input class="input-num" type="number" min="10" max="600"
-        value="${t.preset}" data-timer-custom="${exId}" />
-      <span>秒</span>
+    <div class="timer-rest-note">
+      ${perEx
+        ? `この種目は <strong>${ex.restSec}秒</strong> で保存済み（共通は${settings.defaultRestSec}秒）
+           <button class="btn-rest-clear" data-timer-rest-clear="${exId}">共通に戻す</button>`
+        : `共通の <strong>${settings.defaultRestSec}秒</strong> を使用中。秒数を選ぶとこの種目に保存されます`}
     </div>
     ` : ''}
 
     <div class="timer-display ${cls}" id="timer-disp-${exId}">
       ${formatSec(displaySec)}
     </div>
+
+    ${t.running && t.mode==='countdown' ? `
+    <div class="timer-adjust-row">
+      <button class="btn-timer-adjust" data-timer-adjust="${exId}" data-delta="-15">− 15秒</button>
+      <button class="btn-timer-adjust" data-timer-adjust="${exId}" data-delta="15">＋ 15秒</button>
+    </div>
+    ` : ''}
 
     <div class="timer-ctrl-row">
       ${t.running ? `
@@ -916,6 +986,46 @@ function renderLogSession(log, index, count) {
     </div>`;
 }
 
+// ── 設定カード（体重・レスト時間の既定値） ───────────────────────
+function renderSettingsCard() {
+  const isPreset = REST_PRESETS.includes(settings.defaultRestSec);
+  const bwCount  = exercises.filter(x => x.bodyweight).length;
+  return `
+    <div class="transfer-card">
+      <div class="transfer-title">⚙️ 設定</div>
+
+      <div class="setting-block">
+        <div class="setting-label">体重</div>
+        <div class="setting-help">
+          懸垂・腕立てなど「自重を加算」にした種目の重量計算に使います。
+          ${bwCount ? `いま ${bwCount}種目 が自重ONです。` : '種目の編集画面で ON にできます。'}
+        </div>
+        <div class="setting-input-row">
+          <input class="form-input setting-input" id="set-bodyweight" type="number" inputmode="decimal"
+                 step="0.1" min="0" max="300" value="${settings.bodyWeight || ''}" placeholder="70" />
+          <span class="setting-unit">kg</span>
+        </div>
+        ${!settings.bodyWeight && bwCount ? `<div class="bw-warn">体重が未設定です。自重ぶんが 0kg で計算されています</div>` : ''}
+      </div>
+
+      <div class="setting-block">
+        <div class="setting-label">レスト時間の既定値</div>
+        <div class="setting-help">
+          種目ごとに指定していない場合はこの秒数を使います。
+          変えると、いま動いていないタイマーにもすぐ反映されます。
+        </div>
+        <div class="timer-presets">
+          ${REST_PRESETS.map(p => `
+            <button class="btn-preset${settings.defaultRestSec===p?' selected':''}" data-default-rest="${p}">${p}秒</button>
+          `).join('')}
+          <button class="btn-preset${!isPreset?' selected':''}" data-default-rest-custom="1">
+            ${!isPreset ? `${settings.defaultRestSec}秒 ✏️` : 'その他'}
+          </button>
+        </div>
+      </div>
+    </div>`;
+}
+
 // ── Obsidian 書き出しカード ───────────────────────────────────────
 function renderObsidianCard() {
   return `
@@ -987,6 +1097,7 @@ function renderStats() {
       </div>
     ` : ''}
 
+    ${renderSettingsCard()}
     ${renderSyncCard()}
     ${renderObsidianCard()}
 
@@ -1026,7 +1137,8 @@ const timerIntervals = {};
 function getOrInitTimer(exId) {
   if (!session[exId]) session[exId] = { sets: [], open: true };
   if (!session[exId].timer) {
-    session[exId].timer = { mode: 'countdown', preset: 90, cur: 90, running: false };
+    const sec = restSecFor(exercises.find(x => x.id === exId));
+    session[exId].timer = { mode: 'countdown', preset: sec, cur: sec, running: false };
   }
   return session[exId].timer;
 }
@@ -1089,6 +1201,70 @@ function timerReset(exId) {
   t.cur = t.mode === 'countdown' ? t.preset : 0;
   saveSession();
   renderExList();
+}
+
+// 秒数を変える。計測中でも止めず、経過時間を保ったまま残りが増減する。
+//   persist=true なら「この種目のレスト時間」として保存する。
+function timerSetSec(exId, sec, persist) {
+  sec = clampRest(sec);
+  const ex = exercises.find(x => x.id === exId);
+  const t  = getOrInitTimer(exId);
+  if (persist && ex) { ex.restSec = sec; saveExercises(); }
+  t.preset = sec;
+
+  if (t.running && t.startEpoch && t.mode === 'countdown') {
+    const elapsed = Math.floor((Date.now() - t.startEpoch) / 1000);
+    t.cur = Math.max(0, sec - elapsed);
+    if (t.cur <= 0) {          // 縮めた結果もう時間が過ぎていた
+      t.running = false;
+      clearInterval(timerIntervals[exId]);
+    }
+  } else if (!t.running) {
+    t.cur = t.mode === 'countdown' ? sec : (t.cur || 0);
+    t.startEpoch = null;
+  }
+  saveSession();
+  renderExList();
+}
+
+// ±15秒。その場限りなので、保存されているレスト時間は変えない
+function timerAdjust(exId, delta) {
+  const t = getOrInitTimer(exId);
+  if (t.mode !== 'countdown') return;
+  timerSetSec(exId, (t.preset || 90) + delta, false);
+}
+
+// モード切替。計測中なら経過時間を引き継ぐ（止めない）
+function timerSetMode(exId, mode) {
+  const t = getOrInitTimer(exId);
+  if (t.mode === mode) return;
+  if (t.running && t.startEpoch) {
+    const elapsed = Math.floor((Date.now() - t.startEpoch) / 1000);
+    t.mode = mode;
+    t.cur  = mode === 'countdown' ? Math.max(0, t.preset - elapsed) : elapsed;
+    if (mode === 'countdown' && t.cur <= 0) {
+      t.running = false;
+      clearInterval(timerIntervals[exId]);
+    }
+  } else {
+    t.mode = mode;
+    t.cur  = mode === 'countdown' ? t.preset : 0;
+    t.startEpoch = null;
+  }
+  saveSession();
+  renderExList();
+}
+
+// 設定を変えたとき、動いていないタイマーを新しい秒数に合わせる
+function refreshIdleTimers() {
+  Object.keys(session).forEach(id => {
+    const t = session[id] && session[id].timer;
+    if (!t || t.running) return;
+    const ex = exercises.find(x => x.id === +id);
+    t.preset = restSecFor(ex);
+    if (t.mode === 'countdown') t.cur = t.preset;
+  });
+  saveSession();
 }
 
 function updateTimerDisplay(exId, t) {
@@ -1192,14 +1368,27 @@ function bindEvents() {
     showToast('🗑 全データを削除しました'); render();
   });
 
-  // ── 日付をまたいだ記録を「今日」に付け替える
-  document.getElementById('btn-carryover-today')?.addEventListener('click', () => {
-    sessionMeta.date = todayISO(); saveSessionMeta();
-    showToast('📅 今日の記録として保存します'); render();
+  // ── 設定：体重
+  document.getElementById('set-bodyweight')?.addEventListener('change', (e) => {
+    const v = Math.max(0, Math.min(300, parseFloat(e.target.value) || 0));
+    settings.bodyWeight = v;
+    saveSettings();
+    showToast(v ? `⚖️ 体重を ${v}kg にしました` : '⚖️ 体重を未設定にしました');
+    render();
   });
 
   // ── Content-level delegation (single handler)
   content.addEventListener('click', (e) => {
+    // 日付をまたいだ記録を、どちらの日付で保存するか選ぶ
+    const carryBtn = e.target.closest('[data-carryover-date]');
+    if (carryBtn) {
+      sessionMeta.date = carryBtn.dataset.carryoverDate;
+      saveSessionMeta();
+      showToast(`📅 ${jpDate(sessionMeta.date)} の記録として保存します`);
+      render();
+      return;
+    }
+
     // ログの日付変更 / 削除
     const logEditBtn = e.target.closest('[data-log-edit]');
     if (logEditBtn) { openLogEditModal('workout', logEditBtn.dataset.logEdit); return; }
@@ -1324,8 +1513,12 @@ function bindEvents() {
       const ex = exercises.find(x => x.id === id); if (!ex) return;
       if (!session[id]) session[id] = { sets: [], open: true };
       // 最初の1セット目でその日を確定させる（日付をまたいでも記録が動かないように）
-      if (!sessionMeta.date) { sessionMeta.date = todayISO(); saveSessionMeta(); }
-      session[id].sets.push({ time: nowHHMM(), weight: ex.weight });
+      if (!sessionMeta.startDate) {
+        sessionMeta.startDate = todayISO();
+        sessionMeta.date      = todayISO();
+        saveSessionMeta();
+      }
+      session[id].sets.push({ time: nowHHMM(), weight: effectiveWeight(ex) });
 
       const rect   = setTapBtn.getBoundingClientRect();
       const ripple = document.createElement('div');
@@ -1375,26 +1568,49 @@ function bindEvents() {
     const tResetBtn = e.target.closest('[data-timer-reset]');
     if (tResetBtn && !tResetBtn.id?.includes('hiit')) { timerReset(+tResetBtn.dataset.timerReset); return; }
 
-    // Timer mode
+    // モード切替（計測中でも経過時間を引き継ぐ）
     const tModeBtn = e.target.closest('[data-timer-mode]');
-    if (tModeBtn) {
-      const id   = +tModeBtn.dataset.timerMode;
-      const mode = tModeBtn.dataset.mode;
-      timerStop(id);
+    if (tModeBtn) { timerSetMode(+tModeBtn.dataset.timerMode, tModeBtn.dataset.mode); return; }
+
+    // レスト秒数。この種目に保存され、計測中なら残り時間が増減する
+    const tPresetBtn = e.target.closest('[data-timer-preset]');
+    if (tPresetBtn) { timerSetSec(+tPresetBtn.dataset.timerPreset, +tPresetBtn.dataset.sec, true); return; }
+
+    // その他の秒数を入力する
+    const tCustomBtn = e.target.closest('[data-timer-custom-open]');
+    if (tCustomBtn) { openRestCustomModal(+tCustomBtn.dataset.timerCustomOpen); return; }
+
+    // ±15秒（その場限り）
+    const tAdjBtn = e.target.closest('[data-timer-adjust]');
+    if (tAdjBtn) { timerAdjust(+tAdjBtn.dataset.timerAdjust, +tAdjBtn.dataset.delta); return; }
+
+    // 種目ごとの指定をやめて共通に戻す
+    const tClearBtn = e.target.closest('[data-timer-rest-clear]');
+    if (tClearBtn) {
+      const id = +tClearBtn.dataset.timerRestClear;
+      const ex = exercises.find(x => x.id === id);
+      if (ex) { ex.restSec = null; saveExercises(); }
       const t = getOrInitTimer(id);
-      t.mode = mode; t.cur = mode === 'countdown' ? t.preset : 0; t.startEpoch = null;
-      saveSession(); renderExList(); return;
+      if (!t.running) { t.preset = restSecFor(ex); if (t.mode === 'countdown') t.cur = t.preset; }
+      saveSession(); renderExList();
+      showToast(`⏱ 共通の ${settings.defaultRestSec}秒に戻しました`);
+      return;
     }
 
-    // Timer preset
-    const tPresetBtn = e.target.closest('[data-timer-preset]');
-    if (tPresetBtn) {
-      const id  = +tPresetBtn.dataset.timerPreset;
-      const sec = +tPresetBtn.dataset.sec;
-      timerStop(id);
-      const t = getOrInitTimer(id);
-      t.preset = sec; t.cur = sec; t.startEpoch = null;
-      saveSession(); renderExList(); return;
+    // 設定カード：レスト時間の既定値
+    const defRestBtn = e.target.closest('[data-default-rest]');
+    if (defRestBtn) {
+      settings.defaultRestSec = clampRest(defRestBtn.dataset.defaultRest);
+      saveSettings(); refreshIdleTimers(); render(); return;
+    }
+    const defRestCustomBtn = e.target.closest('[data-default-rest-custom]');
+    if (defRestCustomBtn) {
+      openSecInputModal({
+        title: 'レスト時間の既定値',
+        value: settings.defaultRestSec, min: 5, max: 3600,
+        onConfirm: (v) => { settings.defaultRestSec = v; saveSettings(); refreshIdleTimers(); render(); },
+      });
+      return;
     }
   });
 
@@ -1411,17 +1627,6 @@ function bindEvents() {
         showToast(`✅ ${file.name} を設定しました`); render();
       });
       return;
-    }
-
-    // Timer custom input
-    const customInput = e.target.closest('[data-timer-custom]');
-    if (customInput) {
-      const id  = +customInput.dataset.timerCustom;
-      const val = Math.max(10, Math.min(600, +customInput.value || 90));
-      timerStop(id);
-      const t = getOrInitTimer(id);
-      t.preset = val; t.cur = val;
-      saveSession(); renderExList();
     }
   });
 }
@@ -1460,13 +1665,18 @@ function saveLog() {
   const dayTotal = entries.reduce((sum, e) => sum + e.total, 0);
   const date     = sessionMeta.date || todayISO();
 
-  logs.unshift({ id: newId(), date, time: nowHHMM(), entries, total: dayTotal });
+  // 過去の日付で保存するときに「保存を押した時刻」を入れると、
+  // 23時台にやった記録が翌朝の時刻で残ってしまう。最後のセットの時刻を使う。
+  const lastSet = entries.flatMap(e => e.setList || []).map(x => x.time).filter(Boolean).sort().pop();
+  const time    = (date === todayISO()) ? nowHHMM() : (lastSet || nowHHMM());
+
+  logs.unshift({ id: newId(), date, time, entries, total: dayTotal });
   saveLogs();
 
   const nth = logs.filter(l => l.date === date).length;
 
   session = {}; saveSession();
-  sessionMeta = {}; saveSessionMeta();
+  sessionMeta = {}; saveSessionMeta();   // startDate も消える
   Object.keys(timerIntervals).forEach(k => clearInterval(timerIntervals[k]));
   showToast(nth > 1
     ? `✅ ${jpDate(date)} の${nth}件目として保存（${dayTotal.toLocaleString()} kg）`
@@ -1560,104 +1770,287 @@ function saveCardio() {
   showToast('✅ 有酸素を記録しました'); render();
 }
 
+// 数値をひとつ入れてもらう小さなモーダル（レスト秒数・自重の割合など）
+function openSecInputModal({ title, value, unit = '秒', min = 1, max = 3600, step = 5, help = '', onConfirm }) {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal-sheet">
+      <div class="modal-pill"></div>
+      <div class="modal-title">${esc(title)}</div>
+      ${help ? `<div class="setting-help" style="margin-bottom:12px">${esc(help)}</div>` : ''}
+      <div class="sec-input-row">
+        <button class="btn-sec-step" data-step="${-step}">−${step}</button>
+        <input class="form-input sec-input" id="sec-input" type="number" inputmode="numeric"
+               min="${min}" max="${max}" value="${value}" />
+        <span class="sec-unit">${esc(unit)}</span>
+        <button class="btn-sec-step" data-step="${step}">＋${step}</button>
+      </div>
+      <div class="modal-btn-row">
+        <button class="btn-cancel" data-sec-cancel="1">キャンセル</button>
+        <button class="btn-confirm" data-sec-ok="1">決定</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  const input = overlay.querySelector('#sec-input');
+  input.focus(); input.select();
+  const clamp = v => Math.max(min, Math.min(max, Math.round(+v || 0)));
+
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) { overlay.remove(); return; }
+    const stepBtn = e.target.closest('[data-step]');
+    if (stepBtn) { input.value = clamp((+input.value || 0) + +stepBtn.dataset.step); return; }
+    if (e.target.closest('[data-sec-cancel]')) { overlay.remove(); return; }
+    if (e.target.closest('[data-sec-ok]')) {
+      const v = clamp(input.value);
+      overlay.remove();
+      onConfirm(v);
+    }
+  });
+}
+
+// タイマーの「その他」からレスト秒数を入れる
+function openRestCustomModal(exId) {
+  const t = getOrInitTimer(exId);
+  openSecInputModal({
+    title: 'レスト時間',
+    value: t.preset || settings.customRestSec || settings.defaultRestSec,
+    min: 5, max: 3600,
+    help: 'ここで決めた秒数は、この種目のレスト時間として保存されます',
+    onConfirm: (v) => { settings.customRestSec = v; saveSettings(); timerSetSec(exId, v, true); },
+  });
+}
+
 // ================================================================
 //  MODAL (Add / Edit)
 // ================================================================
 function openModal(ex = null) {
-  const isEdit = !!ex;
+  const isEdit  = !!ex;
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
-
-  const presets      = ex?.presetWeights || [];
-  const commonWeights= [2.5,5,10,15,20,25,30,35,40,45,50,60,70,80,100];
-  const allPresets   = [...new Set([...presets, ...commonWeights])].sort((a,b)=>a-b);
-  const currentW     = isEdit ? ex.weight : 60;
-  const targetSets   = ex?.targetSets || 3;
-
-  overlay.innerHTML = `
-    <div class="modal-sheet">
-      <div class="modal-pill"></div>
-      <div class="modal-title">${isEdit ? '種目を編集' : '種目を追加'}</div>
-
-      <label class="form-label">種目名</label>
-      <div class="name-input-row">
-        <input class="form-input${isEdit ? ' name-locked' : ''}" id="modal-name" type="text"
-          value="${isEdit ? esc(ex.name) : ''}" placeholder="例：ベンチプレス"
-          ${isEdit ? 'readonly' : ''} style="margin-bottom:0;flex:1" />
-        ${isEdit ? `<button class="btn-name-unlock" id="btn-name-unlock">✏️ 変更</button>` : ''}
-      </div>
-
-      <label class="form-label" style="margin-top:16px">重量 (kg)</label>
-      <div class="weight-presets-row">
-        ${allPresets.map(w => `
-          <button class="btn-weight-preset${currentW === w ? ' selected' : ''}" data-weight="${w}">${w}</button>
-        `).join('')}
-      </div>
-      <input class="form-input" id="modal-weight" type="number"
-        value="${currentW}" min="0" step="0.5" />
-
-      <label class="form-label">目標セット数</label>
-      <div class="target-sets-row">
-        ${[1,2,3,4,5,6,7,8,9,10].map(n => `
-          <button class="btn-target-set${targetSets===n?' selected':''}" data-target="${n}">${n}</button>
-        `).join('')}
-      </div>
-
-      <div class="modal-btn-row">
-        <button class="btn-cancel" id="modal-cancel">キャンセル</button>
-        <button class="btn-confirm" id="modal-confirm">保存</button>
-      </div>
-    </div>
-  `;
-
   document.body.appendChild(overlay);
-  if (!isEdit) document.getElementById('modal-name').focus();
 
-  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  const commonWeights = [2.5,5,10,15,20,25,30,35,40,45,50,60,70,80,100];
+  const allPresets    = [...new Set([...(ex?.presetWeights || []), ...commonWeights])].sort((a,b)=>a-b);
 
-  document.getElementById('btn-name-unlock')?.addEventListener('click', () => {
-    const inp = document.getElementById('modal-name');
-    inp.removeAttribute('readonly'); inp.classList.remove('name-locked');
-    inp.focus(); inp.select();
-    document.getElementById('btn-name-unlock').style.display = 'none';
-  });
+  const BW_RATIOS = [
+    { r: 100, label: '100%', hint: '懸垂・ディップス' },
+    { r: 65,  label: '65%',  hint: '腕立て伏せ' },
+    { r: 50,  label: '50%',  hint: '軽い自重種目' },
+  ];
 
-  overlay.querySelectorAll('[data-weight]').forEach(btn => {
-    btn.addEventListener('click', () => {
+  // 編集中の値はここに持つ。描き直しても入力が消えないようにするため。
+  const st = {
+    name:       isEdit ? ex.name : '',
+    weight:     isEdit ? ex.weight : 60,
+    targetSets: ex?.targetSets || 3,
+    restSec:    (ex && typeof ex.restSec === 'number') ? ex.restSec : null,  // null = 共通
+    bodyweight: !!ex?.bodyweight,
+    bwRatio:    ex?.bwRatio ?? 100,
+    bodyWeight: settings.bodyWeight || 0,
+    nameLocked: isEdit,
+  };
+
+  // 描き直す前に、入力欄の現在値を st に取り込む
+  function capture() {
+    const q = sel => overlay.querySelector(sel);
+    if (q('#modal-name'))       st.name       = q('#modal-name').value;
+    if (q('#modal-weight'))     st.weight     = q('#modal-weight').value === '' ? '' : parseFloat(q('#modal-weight').value);
+    if (q('#modal-bodyweight')) st.bodyWeight = parseFloat(q('#modal-bodyweight').value) || 0;
+  }
+
+  function effective() {
+    const add = parseFloat(st.weight) || 0;
+    if (!st.bodyweight) return Math.round(add * 10) / 10;
+    return Math.round(((st.bodyWeight || 0) * (st.bwRatio / 100) + add) * 10) / 10;
+  }
+
+  function refreshPreview() {
+    const box = overlay.querySelector('.bw-preview');
+    if (box) box.innerHTML = `1セットで扱う重量：<strong>${effective()} kg</strong>`;
+  }
+
+  function paint() {
+    const restIsPreset = st.restSec !== null && REST_PRESETS.includes(st.restSec);
+    const ratioIsPreset = BW_RATIOS.some(o => o.r === st.bwRatio);
+    overlay.innerHTML = `
+      <div class="modal-sheet">
+        <div class="modal-pill"></div>
+        <div class="modal-title">${isEdit ? '種目を編集' : '種目を追加'}</div>
+
+        <label class="form-label">種目名</label>
+        <div class="name-input-row">
+          <input class="form-input${st.nameLocked ? ' name-locked' : ''}" id="modal-name" type="text"
+            value="${esc(st.name)}" placeholder="例：ベンチプレス"
+            ${st.nameLocked ? 'readonly' : ''} style="margin-bottom:0;flex:1" />
+          ${st.nameLocked ? `<button class="btn-name-unlock" data-name-unlock="1">✏️ 変更</button>` : ''}
+        </div>
+
+        <label class="form-label" style="margin-top:16px">自重を加算</label>
+        <div class="bw-toggle-row">
+          <button class="hiit-toggle-btn${st.bodyweight ? ' active' : ''}" data-bw-toggle="1">
+            ${st.bodyweight ? 'ON' : 'OFF'}
+          </button>
+          <span class="setting-help">懸垂・腕立てなど、体重そのものが負荷になる種目</span>
+        </div>
+
+        ${st.bodyweight ? `
+          <div class="bw-ratio-row">
+            ${BW_RATIOS.map(o => `
+              <button class="btn-preset bw-ratio-btn${st.bwRatio === o.r ? ' selected' : ''}" data-bw-ratio="${o.r}">
+                ${o.label}<span class="bw-ratio-hint">${o.hint}</span>
+              </button>`).join('')}
+            <button class="btn-preset bw-ratio-btn${!ratioIsPreset ? ' selected' : ''}" data-bw-ratio-custom="1">
+              ${!ratioIsPreset ? `${st.bwRatio}%` : 'その他'}<span class="bw-ratio-hint">自分で決める</span>
+            </button>
+          </div>
+          <div class="bw-weight-row">
+            <span>体重</span>
+            <input class="form-input" id="modal-bodyweight" type="number" inputmode="decimal"
+                   step="0.1" min="0" max="300" value="${st.bodyWeight || ''}" placeholder="70" />
+            <span>kg</span>
+          </div>
+          ${!st.bodyWeight ? `<div class="bw-warn">体重を入れないと自重ぶんが 0kg で計算されます</div>` : ''}
+        ` : ''}
+
+        <label class="form-label">${st.bodyweight ? '追加の重量 (kg)　※ベルトやダンベル。無ければ0' : '重量 (kg)'}</label>
+        <div class="weight-presets-row">
+          ${allPresets.map(w => `
+            <button class="btn-weight-preset${parseFloat(st.weight) === w ? ' selected' : ''}" data-weight="${w}">${w}</button>
+          `).join('')}
+        </div>
+        <input class="form-input" id="modal-weight" type="number" inputmode="decimal"
+          value="${st.weight}" min="0" step="0.5" />
+
+        ${st.bodyweight ? `<div class="bw-preview">1セットで扱う重量：<strong>${effective()} kg</strong></div>` : ''}
+
+        <label class="form-label">目標セット数</label>
+        <div class="target-sets-row">
+          ${[1,2,3,4,5,6,7,8,9,10].map(n => `
+            <button class="btn-target-set${st.targetSets===n?' selected':''}" data-target="${n}">${n}</button>
+          `).join('')}
+        </div>
+
+        <label class="form-label">レスト時間</label>
+        <div class="timer-presets">
+          <button class="btn-preset${st.restSec === null ? ' selected' : ''}" data-modal-rest="default">
+            共通（${settings.defaultRestSec}秒）
+          </button>
+          ${REST_PRESETS.map(p => `
+            <button class="btn-preset${st.restSec === p ? ' selected' : ''}" data-modal-rest="${p}">${p}秒</button>
+          `).join('')}
+          <button class="btn-preset${(st.restSec !== null && !restIsPreset) ? ' selected' : ''}" data-modal-rest="custom">
+            ${(st.restSec !== null && !restIsPreset) ? `${st.restSec}秒 ✏️` : 'その他'}
+          </button>
+        </div>
+
+        <div class="modal-btn-row">
+          <button class="btn-cancel" data-modal-cancel="1">キャンセル</button>
+          <button class="btn-confirm" data-modal-confirm="1">保存</button>
+        </div>
+      </div>`;
+  }
+
+  paint();
+  if (!isEdit) overlay.querySelector('#modal-name').focus();
+
+  overlay.addEventListener('input', (e) => {
+    if (e.target.id === 'modal-weight') {
       overlay.querySelectorAll('[data-weight]').forEach(b => b.classList.remove('selected'));
-      btn.classList.add('selected');
-      document.getElementById('modal-weight').value = btn.dataset.weight;
-    });
-  });
-
-  document.getElementById('modal-weight')?.addEventListener('input', () => {
-    overlay.querySelectorAll('[data-weight]').forEach(b => b.classList.remove('selected'));
-  });
-
-  let selectedTarget = targetSets;
-  overlay.querySelectorAll('[data-target]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      overlay.querySelectorAll('[data-target]').forEach(b => b.classList.remove('selected'));
-      btn.classList.add('selected');
-      selectedTarget = +btn.dataset.target;
-    });
-  });
-
-  document.getElementById('modal-cancel').addEventListener('click', () => overlay.remove());
-
-  document.getElementById('modal-confirm').addEventListener('click', () => {
-    const name   = document.getElementById('modal-name').value.trim();
-    const weight = parseFloat(document.getElementById('modal-weight').value) || 0;
-    if (!name) { showToast('⚠️ 種目名を入力してください'); return; }
-
-    if (isEdit) {
-      const updatedPresets = [...new Set([...(ex.presetWeights || []), weight])];
-      exercises = exercises.map(x => x.id === ex.id
-        ? { ...x, name, weight, targetSets: selectedTarget, presetWeights: updatedPresets } : x);
-    } else {
-      exercises.push({ id: uid(), name, weight, targetSets: selectedTarget, presetWeights: [weight] });
+      st.weight = e.target.value === '' ? '' : parseFloat(e.target.value);
+      refreshPreview();
+    } else if (e.target.id === 'modal-bodyweight') {
+      st.bodyWeight = parseFloat(e.target.value) || 0;
+      refreshPreview();
     }
-    saveExercises(); overlay.remove(); render();
+  });
+
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) { overlay.remove(); return; }
+
+    if (e.target.closest('[data-name-unlock]')) {
+      capture(); st.nameLocked = false; paint();
+      const inp = overlay.querySelector('#modal-name'); inp.focus(); inp.select();
+      return;
+    }
+
+    if (e.target.closest('[data-bw-toggle]')) {
+      capture();
+      st.bodyweight = !st.bodyweight;
+      // 新規追加でONにした直後は、初期値の60kgが「追加のオモリ」として残ると紛らわしい
+      if (st.bodyweight && !isEdit && parseFloat(st.weight) === 60) st.weight = 0;
+      paint();
+      return;
+    }
+
+    const ratioBtn = e.target.closest('[data-bw-ratio]');
+    if (ratioBtn) { capture(); st.bwRatio = +ratioBtn.dataset.bwRatio; paint(); return; }
+
+    if (e.target.closest('[data-bw-ratio-custom]')) {
+      capture();
+      openSecInputModal({
+        title: '体重にかける割合', unit: '%', value: st.bwRatio, min: 1, max: 200, step: 5,
+        help: '懸垂・ディップスは100%、腕立て伏せはおよそ65%が目安です',
+        onConfirm: (v) => { st.bwRatio = v; paint(); },
+      });
+      return;
+    }
+
+    const wBtn = e.target.closest('[data-weight]');
+    if (wBtn) { capture(); st.weight = parseFloat(wBtn.dataset.weight); paint(); return; }
+
+    const tBtn = e.target.closest('[data-target]');
+    if (tBtn) { capture(); st.targetSets = +tBtn.dataset.target; paint(); return; }
+
+    const rBtn = e.target.closest('[data-modal-rest]');
+    if (rBtn) {
+      capture();
+      const v = rBtn.dataset.modalRest;
+      if (v === 'default') { st.restSec = null; paint(); }
+      else if (v === 'custom') {
+        openSecInputModal({
+          title: 'レスト時間', value: st.restSec || settings.defaultRestSec, min: 5, max: 3600,
+          onConfirm: (sec) => { st.restSec = sec; paint(); },
+        });
+      } else { st.restSec = +v; paint(); }
+      return;
+    }
+
+    if (e.target.closest('[data-modal-cancel]')) { overlay.remove(); return; }
+
+    if (e.target.closest('[data-modal-confirm]')) {
+      capture();
+      const name   = String(st.name || '').trim();
+      const weight = parseFloat(st.weight) || 0;
+      if (!name) { showToast('⚠️ 種目名を入力してください'); return; }
+
+      // モーダルで体重を入れ直していたら設定にも反映する
+      if (st.bodyweight && st.bodyWeight !== (settings.bodyWeight || 0)) {
+        settings.bodyWeight = st.bodyWeight;
+        saveSettings();
+      }
+
+      const fields = {
+        name, weight,
+        targetSets: st.targetSets,
+        bodyweight: st.bodyweight,
+        bwRatio:    st.bwRatio,
+        restSec:    st.restSec,
+      };
+
+      if (isEdit) {
+        const updatedPresets = [...new Set([...(ex.presetWeights || []), weight])];
+        exercises = exercises.map(x => x.id === ex.id ? { ...x, ...fields, presetWeights: updatedPresets } : x);
+      } else {
+        exercises.push({ id: uid(), ...fields, presetWeights: [weight] });
+      }
+      saveExercises();
+      refreshIdleTimers();
+      overlay.remove();
+      render();
+      return;
+    }
   });
 }
 
