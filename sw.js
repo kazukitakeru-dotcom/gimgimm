@@ -1,11 +1,12 @@
 // ファイルを足したり中身を変えたら必ずこの版数を上げること。
 // 上げないと古いキャッシュが配られて変更が反映されない。
-const CACHE_NAME = 'ironlog-v12';
+const CACHE_NAME = 'ironlog-v13';
 const ASSETS = [
   './',
   './index.html',
   './app.js',
   './obsidian.js',
+  './aitext.js',
   './sync.js',
   './style.css',
   './manifest.json'

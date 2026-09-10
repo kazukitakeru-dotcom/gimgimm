@@ -10,6 +10,7 @@ iPhone のホーム画面に追加して使う。classic script なので `impor
 | `index.html` | `app.js` → `obsidian.js` → `sync.js` の順に読み込むだけ |
 | `app.js` | 画面とデータの本体。文字列テンプレートで全部描画して `render()` で差し替える |
 | `obsidian.js` | Obsidian用Markdown書き出し（ZIPは無圧縮storeを自前で組み立て） |
+| `aitext.js` | 記録をAIに貼れるテキストにして書き出す（クリップボード）|
 | `sync.js` | Supabase同期。外部ライブラリを使わず `fetch` で直接叩く |
 | `supabase.sql` | 同期用テーブル定義。何度実行しても壊れない |
 
@@ -49,6 +50,18 @@ iPhone のホーム画面に追加して使う。classic script なので `impor
 - 種目モーダルは `paint()` で innerHTML を作り直す方式。**再描画の前に必ず `capture()`** で
   入力欄の値を `st` に退避すること（しないと打った内容が消える）。
   クリックは overlay への委譲で拾っているので、作り直してもハンドラは貼り直さなくてよい
+
+## AIに貼る用のコピー（aitext.js）
+
+数字だけ渡すとAIが読み違えるので、本文の先頭に必ず「読み方」を入れる
+（総重量＝各セットの重量の合計／レップ数は記録していない／自重は合計に含まれている）。
+
+- **クリップボードは同期的に呼ぶこと。** `navigator.clipboard.writeText()` の前に `await` を
+  挟むとユーザー操作の文脈が切れて iOS で失敗する。`aiCopyText()` はクリックハンドラから
+  直接呼ぶ形にしてある
+- 失敗したら `execCommand('copy')` → それも駄目なら選択できる textarea を出す三段構え
+- 範囲・オプションのモーダルは `paint()` で作り直す方式（種目モーダルと同じ）。
+  入力欄が無く状態は `st` だけなので `capture()` は要らない
 
 ## 改修時の注意
 

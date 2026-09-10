@@ -950,7 +950,7 @@ function renderLog() {
     d.cardio.sort((a, b) => (a.time || '').localeCompare(b.time || ''));
   });
 
-  return Object.keys(days).sort().reverse().map(date => {
+  const cards = Object.keys(days).sort().reverse().map(date => {
     const d        = days[date];
     const dayTotal = d.workouts.reduce((s, l) => s + (l.total || 0), 0);
     return `
@@ -958,12 +958,19 @@ function renderLog() {
       <div class="log-date">
         ${jpDate(date)}<span class="log-weekday">(${isoWeekday(date)})</span>
         ${d.workouts.length > 1 ? `<span class="log-count-badge">${d.workouts.length}回</span>` : ''}
+        <button class="btn-icon log-date-copy" data-ai-copy-day="${date}" title="この日をAIに貼る用にコピー">🤖</button>
       </div>
       ${d.workouts.map((log, i) => renderLogSession(log, i, d.workouts.length)).join('')}
       ${d.cardio.map(c => renderCardioLogItem(c, true)).join('')}
       ${dayTotal > 0 ? `<div class="log-total">この日の総重量：<strong>${dayTotal.toLocaleString()} kg</strong></div>` : ''}
     </div>`;
   }).join('');
+
+  return `
+    <button class="btn-ai-copy-all" data-ai-copy-all="1">
+      🤖 AIに貼る用にコピー（範囲を選ぶ）
+    </button>
+    ${cards}`;
 }
 
 function renderLogSession(log, index, count) {
@@ -973,6 +980,7 @@ function renderLogSession(log, index, count) {
         <span class="log-session-time">🕐 ${log.time || '時刻なし'}</span>
         ${count > 1 ? `<span class="log-session-nth">${index + 1}回目</span>` : ''}
         <span class="log-session-total">${log.total.toLocaleString()} kg</span>
+        <button class="btn-icon" data-ai-copy-log="${log.id}" title="AIに貼る用にコピー">🤖</button>
         <button class="btn-icon" data-log-edit="${log.id}" title="日付・時刻を変更">✏️</button>
         <button class="btn-icon danger" data-log-del="${log.id}" title="削除">🗑</button>
       </div>
@@ -1387,6 +1395,23 @@ function bindEvents() {
       showToast(`📅 ${jpDate(sessionMeta.date)} の記録として保存します`);
       render();
       return;
+    }
+
+    // AIに貼る用のコピー（aitext.js）
+    const aiLogBtn = e.target.closest('[data-ai-copy-log]');
+    if (aiLogBtn) {
+      if (typeof aiCopySession !== 'function') { showToast('⚠️ aitext.js を読み込めていません'); return; }
+      aiCopySession(aiLogBtn.dataset.aiCopyLog); return;
+    }
+    const aiDayBtn = e.target.closest('[data-ai-copy-day]');
+    if (aiDayBtn) {
+      if (typeof aiCopyDay !== 'function') { showToast('⚠️ aitext.js を読み込めていません'); return; }
+      aiCopyDay(aiDayBtn.dataset.aiCopyDay); return;
+    }
+    const aiAllBtn = e.target.closest('[data-ai-copy-all]');
+    if (aiAllBtn) {
+      if (typeof openAiCopyModal !== 'function') { showToast('⚠️ aitext.js を読み込めていません'); return; }
+      openAiCopyModal(); return;
     }
 
     // ログの日付変更 / 削除
@@ -2106,6 +2131,7 @@ window.IRONLOG = {
   getExercises:  () => exercises,
   getLogs:       () => logs,
   getCardioLogs: () => cardioLogs,
+  getSettings:   () => settings,
 
   setExercises(v)  { exercises  = v || [];                          DB.set('exercises', exercises); },
   setLogs(v)       { logs       = sortByDate(migrateLogs(v || [])); DB.set('logs', logs); },
