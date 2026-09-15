@@ -1,0 +1,59 @@
+# ============================================================================
+# 同期サーバー（Supabase）を止めないための定期アクセス
+#
+# 6つのアプリ（わんにゃん・達人・IRON LOG・URUOI・QUEST LIST・買い物メモ）が
+# 同じ Supabase プロジェクトに相乗りしている。無料枠は7日間どこからも
+# アクセスがないとプロジェクトごと一時停止し、全アプリの同期が止まる
+# （2026-09-15 に実際に止まった）。毎日1回アクセスして止まらないようにする。
+#
+# あわせて、止まっていたら（アドレスが引けなければ）失敗させて
+# GitHub から通知メールが届くようにしてある。
+#
+# 注意: 公開リポジトリの定期実行は、リポジトリに60日間コミットが無いと
+# GitHub が自動で無効にする（その前に通知メールが来る）。
+# ============================================================================
+name: Supabase keepalive
+
+on:
+  schedule:
+    - cron: '23 18 * * *'   # 毎日 03:23（日本時間）
+  workflow_dispatch:         # Actions の画面から手動でも実行できる
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 同期サーバーにアクセスする
+        env:
+          SB_URL: https://kafaarlosuvqxxlxpvgg.supabase.co
+          # publishable key は公開前提のもの。anon の権限は全テーブルで剥がしてある
+          SB_KEY: sb_publishable_nSwOQo-YbEtDN_KTjBf80w_D6o0iLoA
+        run: |
+          set -u
+          fail=0
+
+          # 認証サーバー。curl の終了コード 6 は「アドレスが引けない」＝一時停止の典型
+          code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 "$SB_URL/auth/v1/health" -H "apikey: $SB_KEY")
+          rc=$?
+          if [ "$rc" = "6" ]; then
+            echo "::error::同期サーバーのアドレスが引けません。プロジェクトが一時停止しています。Supabase のダッシュボードで Resume してください"
+            exit 1
+          fi
+          echo "auth/v1/health: HTTP $code (curl=$rc)"
+          [ "$code" = "200" ] || { echo "::error::認証サーバーが応答しません"; fail=1; }
+
+          # 6アプリのテーブルを1件ずつ叩く。anon は revoke 済みなので
+          # 42501（permission denied）が返るのが正常＝データベースまで届いている。
+          # 逆に中身が返ってきたら anon に権限が付いてしまっているので失敗扱いにする。
+          for t in ironlog_logs wannyan_pets tatsujin_sessions uruoi_entries qest_items kaimono_items; do
+            body=$(curl -s -m 20 "$SB_URL/rest/v1/$t?select=*&limit=1" -H "apikey: $SB_KEY")
+            if echo "$body" | grep -q '"42501"'; then
+              echo "$t: OK"
+            else
+              echo "::error::$t: 想定外の応答 ${body:0:200}"
+              fail=1
+            fi
+          done
+
+          exit $fail
