@@ -80,6 +80,29 @@ function sbMessage(raw) {
   return s;
 }
 
+/* fetch 自体が失敗した（サーバーから返事すら来なかった）ときに、原因を切り分けて返す。
+   - 端末がオフライン                        → 「オフライン」
+   - 自分のページの置き場所にも届かない      → 「ネットワークに接続できません」
+   - ネットはつながるのに同期サーバーだけ届かない → サーバー停止の可能性
+   Supabase の無料枠は7日間どのアプリからもアクセスがないとプロジェクトが一時停止し、
+   アドレス自体が引けなくなって fetch が失敗する（2026-09-15 に実際に起きた）。
+   以前はどれも「ネットワークに接続できません」と出ていて原因が分からなかった。
+   status を付けないのは、呼び出し側が「通信エラー＝ログイン情報を捨てない」と判断するため。 */
+async function _unreachableError() {
+  if (!navigator.onLine) return new Error('オフライン');
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 5000);
+  try {
+    // ?probe= を付けて Service Worker のキャッシュに当たらないようにする
+    await fetch(`./manifest.json?probe=${Date.now()}`, { cache: 'no-store', signal: ctl.signal });
+  } catch {
+    return new Error('ネットワークに接続できません');
+  } finally {
+    clearTimeout(timer);
+  }
+  return new Error('同期サーバーに接続できません。サーバーが一時停止している可能性があります');
+}
+
 async function _authFetch(path, body) {
   let res;
   try {
@@ -88,7 +111,7 @@ async function _authFetch(path, body) {
       headers: { 'apikey': SB_KEY, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-  } catch { throw new Error('ネットワークに接続できません'); }
+  } catch { throw await _unreachableError(); }
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
     // 「サーバーに断られた」のか「そもそも届かなかった」のかを呼び出し側が区別できるように
@@ -176,7 +199,7 @@ async function _rest(path, { method = 'GET', body = null, prefer = null } = {}) 
     res = await fetch(`${SB_URL}/rest/v1/${path}`, {
       method, headers, body: body ? JSON.stringify(body) : undefined,
     });
-  } catch { throw new Error('ネットワークに接続できません'); }
+  } catch { throw await _unreachableError(); }
   if (!res.ok) {
     const t = await res.text().catch(() => '');
     throw new Error(sbMessage(t) || `${res.status}`);
