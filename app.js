@@ -2017,6 +2017,13 @@ function openModal(ex = null) {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   document.body.appendChild(overlay);
+  // 画面の枠（シート）は最初に1回だけ作り、paint() では中身だけを差し替える。
+  // 枠ごと作り直すと、開いたときの「下からせり上がる動き」が押すたびに再生され、
+  // その途中で名前欄に入力を合わせた iPhone が画面を下へ送ってしまい、
+  // 名前欄が見えないまま入力することになっていた。スクロール位置も毎回一番上に戻っていた
+  const sheet = document.createElement('div');
+  sheet.className = 'modal-sheet';
+  overlay.appendChild(sheet);
 
   const commonWeights = [2.5,5,10,15,20,25,30,35,40,45,50,60,70,80,100];
   const allPresets    = [...new Set([...(ex?.presetWeights || []), ...commonWeights])].sort((a,b)=>a-b);
@@ -2061,8 +2068,8 @@ function openModal(ex = null) {
   function paint() {
     const restIsPreset = st.restSec !== null && REST_PRESETS.includes(st.restSec);
     const ratioIsPreset = BW_RATIOS.some(o => o.r === st.bwRatio);
-    overlay.innerHTML = `
-      <div class="modal-sheet">
+    const scrollTop = sheet.scrollTop;
+    sheet.innerHTML = `
         <div class="modal-pill"></div>
         <div class="modal-title">${isEdit ? '種目を編集' : '種目を追加'}</div>
 
@@ -2137,8 +2144,8 @@ function openModal(ex = null) {
         <div class="modal-btn-row">
           <button class="btn-cancel" data-modal-cancel="1">キャンセル</button>
           <button class="btn-confirm" data-modal-confirm="1">保存</button>
-        </div>
-      </div>`;
+        </div>`;
+    sheet.scrollTop = scrollTop;
   }
 
   paint();
@@ -2163,6 +2170,7 @@ function openModal(ex = null) {
       // 全選択にすると1文字目で元の名前が丸ごと消えて、見ながら直せなかった。末尾にカーソルを置く
       const inp = overlay.querySelector('#modal-name'); inp.focus();
       const end = inp.value.length; inp.setSelectionRange(end, end);
+      inp.scrollIntoView({ block: 'nearest' });   // キーボードが出ても名前欄が見える位置に
       return;
     }
 
