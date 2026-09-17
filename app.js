@@ -79,6 +79,7 @@ exercises = exercises.map(ex => ({
   restSec: null,        // null = 共通のレスト時間を使う
   bodyweight: false,    // 自重を加算するか（懸垂・腕立てなど）
   bwRatio: 100,         // 体重にかける割合(%)
+  benched: false,       // 補欠（トレーニング画面には出さず、下の補欠欄にしまっておく）
   ...ex
 }));
 
@@ -93,6 +94,11 @@ let logs       = sortByDate(migrateLogs(DB.get('logs', [])));
 let cardioLogs = sortByDate(migrateCardio(DB.get('cardioLogs', [])));
 let currentTab = 'workout';
 let isSortMode = false;
+let benchOpen  = false;   // 補欠欄を開いているか
+
+// レギュラー（トレーニング画面に出す種目）と補欠
+function regulars() { return exercises.filter(x => !x.benched); }
+function benchers() { return exercises.filter(x => x.benched); }
 
 // 旧形式（日本語の日付文字列）から読み込んだ場合はここで新形式に置き換える
 DB.set('logs', logs);
@@ -484,8 +490,9 @@ function renderWorkout() {
       </button>
     </div>
     <div id="ex-list">
-      ${exercises.map((ex, idx) => renderExCard(ex, idx)).join('')}
+      ${renderRegularList()}
     </div>
+    <div id="bench-list">${renderBench()}</div>
     ${previewHtml}
     <button class="btn-save-log" id="btn-save-log">
       💾 ${saveDate === today ? '今日' : mdw(saveDate)}のログを保存
@@ -505,7 +512,43 @@ function buildPreviewEntries() {
     .filter(Boolean);
 }
 
-function renderExCard(ex, index) {
+function renderRegularList() {
+  const list = regulars();
+  if (!list.length) {
+    return `<div class="empty-regular">
+      レギュラーの種目がありません。<br>
+      「＋ 種目を追加」するか、下の補欠から戻してください。
+    </div>`;
+  }
+  return list.map((ex, idx) => renderExCard(ex, idx, list.length)).join('');
+}
+
+// 補欠欄。しばらくやらない種目を消さずにしまっておき、いつでもレギュラーに戻せる
+function renderBench() {
+  const list = benchers();
+  if (!list.length) return '';
+  return `
+    <div class="bench-card">
+      <button class="bench-head" data-bench-toggle="1">
+        <span>🪑 補欠</span>
+        <span class="bench-count">${list.length}</span>
+        <span class="bench-arrow">${benchOpen ? '▲' : '▼'}</span>
+      </button>
+      ${benchOpen ? list.map(ex => `
+        <div class="bench-row">
+          <div class="bench-info">
+            <div class="bench-name">${esc(ex.name)}</div>
+            <div class="bench-sub">${effectiveWeight(ex)} kg ・ 目標 ${ex.targetSets || 3} セット</div>
+          </div>
+          <button class="btn-unbench" data-unbench="${ex.id}">↑ 戻す</button>
+          <button class="btn-icon" data-edit="${ex.id}">✏️</button>
+          <button class="btn-icon danger" data-delete="${ex.id}">🗑</button>
+        </div>
+      `).join('') : ''}
+    </div>`;
+}
+
+function renderExCard(ex, index, count) {
   const sess     = session[ex.id] || { sets: [] };
   const setCount = sess.sets.length;
   const target   = ex.targetSets || 3;
@@ -526,8 +569,9 @@ function renderExCard(ex, index) {
       <div class="ex-card-actions">
         ${isSortMode ? `
           <button class="btn-icon" data-move-up="${ex.id}" ${index === 0 ? 'disabled' : ''}>↑</button>
-          <button class="btn-icon" data-move-down="${ex.id}" ${index === exercises.length - 1 ? 'disabled' : ''}>↓</button>
+          <button class="btn-icon" data-move-down="${ex.id}" ${index === count - 1 ? 'disabled' : ''}>↓</button>
         ` : ''}
+        <button class="btn-bench" data-bench="${ex.id}" title="補欠にする">補欠へ</button>
         <button class="btn-icon" data-edit="${ex.id}">✏️</button>
         <button class="btn-icon danger" data-delete="${ex.id}">🗑</button>
         <button class="btn-icon" data-toggle="${ex.id}">${sess.open ? '▲' : '▼'}</button>
@@ -1483,10 +1527,12 @@ function bindEvents() {
     // Move up
     const moveUpBtn = e.target.closest('[data-move-up]');
     if (moveUpBtn) {
-      const id = +moveUpBtn.dataset.moveUp;
-      const idx = exercises.findIndex(x => x.id === id);
-      if (idx > 0) {
-        [exercises[idx-1], exercises[idx]] = [exercises[idx], exercises[idx-1]];
+      const id  = +moveUpBtn.dataset.moveUp;
+      const reg = regulars();
+      const r   = reg.findIndex(x => x.id === id);
+      if (r > 0) {
+        const a = exercises.indexOf(reg[r - 1]), b = exercises.indexOf(reg[r]);
+        [exercises[a], exercises[b]] = [exercises[b], exercises[a]];
         saveExercises(); renderExList();
       }
       return;
@@ -1495,12 +1541,43 @@ function bindEvents() {
     // Move down
     const moveDownBtn = e.target.closest('[data-move-down]');
     if (moveDownBtn) {
-      const id = +moveDownBtn.dataset.moveDown;
-      const idx = exercises.findIndex(x => x.id === id);
-      if (idx >= 0 && idx < exercises.length - 1) {
-        [exercises[idx], exercises[idx+1]] = [exercises[idx+1], exercises[idx]];
+      const id  = +moveDownBtn.dataset.moveDown;
+      const reg = regulars();
+      const r   = reg.findIndex(x => x.id === id);
+      if (r >= 0 && r < reg.length - 1) {
+        const a = exercises.indexOf(reg[r]), b = exercises.indexOf(reg[r + 1]);
+        [exercises[a], exercises[b]] = [exercises[b], exercises[a]];
         saveExercises(); renderExList();
       }
+      return;
+    }
+
+    // 補欠にする（消さずにしまう）
+    const benchBtn = e.target.closest('[data-bench]');
+    if (benchBtn) {
+      const ex = exercises.find(x => x.id === +benchBtn.dataset.bench);
+      if (!ex) return;
+      ex.benched = true;
+      saveExercises(); renderExList();
+      showToast(`🪑 ${ex.name} を補欠にしました（下の補欠から戻せます）`);
+      return;
+    }
+
+    // レギュラーに戻す
+    const unbenchBtn = e.target.closest('[data-unbench]');
+    if (unbenchBtn) {
+      const ex = exercises.find(x => x.id === +unbenchBtn.dataset.unbench);
+      if (!ex) return;
+      ex.benched = false;
+      saveExercises(); renderExList();
+      showToast(`💪 ${ex.name} をレギュラーに戻しました`);
+      return;
+    }
+
+    // 補欠欄を開く／閉じる
+    if (e.target.closest('[data-bench-toggle]')) {
+      benchOpen = !benchOpen;
+      renderExList();
       return;
     }
 
@@ -1660,7 +1737,9 @@ function bindEvents() {
 function renderExList() {
   const list = document.getElementById('ex-list');
   if (!list) return;
-  list.innerHTML = exercises.map((ex, idx) => renderExCard(ex, idx)).join('');
+  list.innerHTML = renderRegularList();
+  const bench = document.getElementById('bench-list');
+  if (bench) bench.innerHTML = renderBench();
 
   // Update preview card
   const previewEntries = buildPreviewEntries();

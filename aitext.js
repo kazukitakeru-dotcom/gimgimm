@@ -73,7 +73,7 @@ function aiExerciseSection() {
     const rest = typeof x.restSec === 'number' ? `${x.restSec}秒` : `${st.defaultRestSec}秒（共通）`;
     const bw   = x.bodyweight ? `体重×${x.bwRatio ?? 100}%` : '—';
     const w    = x.bodyweight ? (x.weight ? `＋${x.weight}kg` : 'なし') : `${x.weight}kg`;
-    L.push(`| ${x.name} | ${w} | ${x.targetSets || 3} | ${rest} | ${bw} |`);
+    L.push(`| ${x.name}${x.benched ? '（補欠・今は休止中）' : ''} | ${w} | ${x.targetSets || 3} | ${rest} | ${bw} |`);
   });
   L.push('');
   return L;
