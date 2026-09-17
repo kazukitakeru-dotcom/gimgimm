@@ -1726,3 +1726,13 @@ button {
   text-align: center;
 }
 .box-empty-icon { font-size: 30px; opacity: 0.5; margin-bottom: 4px; }
+
+/* この端末で動いているアプリの版（どの端末が古いままか見分ける用） */
+.app-version {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--muted);
+  text-align: right;
+}

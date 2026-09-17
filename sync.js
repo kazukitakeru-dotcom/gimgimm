@@ -231,6 +231,18 @@ function _hash(str) {
   return h1.toString(36) + '-' + h2.toString(36) + '-' + str.length.toString(36);
 }
 
+/* jsonb はキーの順番を保たない。サーバーから戻ってきた内容と手元を比べるときは、
+   キーを並べ替えてから文字列にしないと、中身が同じでも「違う」と判定してしまう。 */
+function _stable(v) {
+  if (Array.isArray(v)) return '[' + v.map(x => (x === undefined ? 'null' : _stable(x))).join(',') + ']';
+  if (v && typeof v === 'object') {
+    return '{' + Object.keys(v).filter(k => v[k] !== undefined).sort()
+      .map(k => JSON.stringify(k) + ':' + _stable(v[k])).join(',') + '}';
+  }
+  return JSON.stringify(v);
+}
+function _exHash(list) { return _hash(_stable(list || [])); }
+
 function _loadSyncState() {
   try {
     const s = JSON.parse(localStorage.getItem(SYNC_STATE_KEY) || 'null');
@@ -243,7 +255,7 @@ function _loadSyncState() {
       return s;
     }
   } catch {}
-  return { lastPulledAt: null, logs: {}, cardio: {}, exHash: null, exAt: 0,
+  return { lastPulledAt: null, logs: {}, cardio: {}, exHash: null, exHashStable: true, stHash: null,
            touched: {}, serverTimeMigrated: true };
 }
 function _saveSyncState(s) {
@@ -299,24 +311,71 @@ async function _pull(state) {
   const bump = ts => { if (ts && (!newest || ts > newest)) newest = ts; };
   let changed = false;
 
-  /* --- 種目リスト・設定（last-write-wins） --- */
+  /* --- 種目リスト（補欠ボックスの印・レスト時間・自重の設定もこの中） ---
+     前回そろえた内容（state.exHash）と比べて、どちらが変わったかで決める。
+       - サーバーだけ変わった → 取り込む
+       - この端末だけ変わった → 送信側で送る
+       - 両方変わった         → この端末を優先して送る
+
+     以前は「サーバーの更新時刻 > この端末の時計で覚えた時刻」で判定し、ハッシュもキー順のまま
+     取っていた。jsonb はキーの順番を保たないので、受け取った種目リストをアプリが読み直した時点で
+     並びが変わって「この端末で変更あり」と誤判定し、他端末の変更を取り込まずに
+     古い一覧で上書きし返していた（補欠にしても別の端末に反映されない）。 */
   const row = stateRows && stateRows[0];
-  if (row && row.doc) {
-    const remoteMs = Date.parse(row.updated_at);
-    const local    = window.IRONLOG.getExercises();
-    const localH   = _hash(JSON.stringify(local));
-    const dirty    = state.exHash !== null && state.exHash !== localH;   // この端末で変えた
-    if (Array.isArray(row.doc.exercises) && remoteMs > (state.exAt || 0) && !dirty) {
-      let next = row.doc.exercises;
-      if (state.exHash === null) {
-        // 初回の同期。この端末にしかない種目を消さないように足しておく
-        const ids = new Set(next.map(x => String(x.id)));
-        next = [...next, ...local.filter(x => !ids.has(String(x.id)))];
+  if (row && row.doc && Array.isArray(row.doc.exercises)) {
+    const local   = window.IRONLOG.getExercises();
+    const remote  = row.doc.exercises;
+    const localH  = _exHash(local);
+    const remoteH = _exHash(remote);
+
+    // キー順のまま取っていた旧ハッシュからの移行（1回だけ）。
+    // 旧ハッシュと手元がそのまま一致すれば「変えていない」と分かる。一致しなければ
+    // 並び順の誤判定か本当の変更か区別できないので、初回と同じくサーバーを基本にそろえる。
+    if (!state.exHashStable) {
+      if (state.exHash !== null) {
+        state.exHash = (state.exHash === _hash(JSON.stringify(local))) ? localH : null;
       }
-      window.IRONLOG.setExercises(next);
-      state.exHash = _hash(JSON.stringify(next));
-      state.exAt   = remoteMs;
+      state.exHashStable = true;
+    }
+
+    if (state.exHash === null) {
+      // 初回。サーバーの内容を基本に、この端末にしかない種目を足す
+      const ids  = new Set(remote.map(x => String(x.id)));
+      const next = [...remote, ...local.filter(x => !ids.has(String(x.id)))];
+      if (_exHash(next) !== localH) { window.IRONLOG.setExercises(next); changed = true; }
+      state.exHash = remoteH;   // 足した種目があれば、送信側でサーバーとの差として送られる
+    } else if (remoteH !== state.exHash && localH === state.exHash) {
+      window.IRONLOG.setExercises(remote);
+      state.exHash = remoteH;
       changed = true;
+    }
+  }
+
+  /* --- 設定（体重・既定のレスト時間） ---
+     種目リストと同じく、前回そろえた内容（state.stHash）と比べてどちらが変わったかで決める。
+     以前は同期しておらず、ある端末で体重を入れても他の端末では 0kg のままだった。 */
+  if (row && row.doc) {
+    const remoteS = row.doc.settings;
+    if (remoteS && typeof remoteS === 'object') {
+      const localS  = window.IRONLOG.getSettings();
+      const localH  = _hash(_stable(localS));
+      const remoteH = _hash(_stable(remoteS));
+      if (state.stHash == null) {
+        // 初回。サーバーを基本にしつつ、サーバーが未設定でこの端末だけ入れてある値は残す
+        const next = Object.assign({}, remoteS);
+        if (!next.bodyWeight && localS.bodyWeight) next.bodyWeight = localS.bodyWeight;
+        if (next.customRestSec == null && localS.customRestSec != null) next.customRestSec = localS.customRestSec;
+        if (_hash(_stable(next)) !== localH) { window.IRONLOG.setSettings(next); changed = true; }
+        state.stHash = remoteH;   // 残した値があれば、送信側でサーバーとの差として送られる
+      } else if (remoteH !== state.stHash && localH === state.stHash) {
+        window.IRONLOG.setSettings(remoteS);
+        state.stHash = remoteH;
+        changed = true;
+      }
+    } else {
+      // サーバーに設定が無い（まだ誰も送っていない／旧版の端末が種目リストだけ送って消した）。
+      // この端末の設定を送り直させる
+      state.stHash = null;
     }
   }
 
@@ -391,16 +450,21 @@ async function _push(state) {
 
   /* --- 種目リスト --- */
   const exercises = window.IRONLOG.getExercises();
-  const exHash = _hash(JSON.stringify(exercises));
-  if (state.exHash !== exHash) {
+  const settings  = window.IRONLOG.getSettings();
+  const exHash = _exHash(exercises);
+  const stHash = _hash(_stable(settings));
+  // doc は行ごと丸ごと置き換わるので、種目リストと設定は必ず一緒に送る
+  // （片方だけ送ると、もう片方がサーバーから消える）
+  if (state.exHash !== exHash || state.stHash !== stHash) {
     await _rest('ironlog_state?on_conflict=user_id', {
       method: 'POST',
       prefer: 'resolution=merge-duplicates,return=minimal',
       // updated_at は送らない。サーバー側のトリガが now() を入れる。
-      body: [{ user_id: userId, doc: { exercises } }],
+      body: [{ user_id: userId, doc: { exercises, settings } }],
     });
     state.exHash = exHash;
-    state.exAt   = Date.now();
+    state.exHashStable = true;
+    state.stHash = stHash;
   }
 
   /* --- 筋トレのログ --- */

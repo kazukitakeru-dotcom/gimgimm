@@ -117,7 +117,7 @@ let settings = Object.assign(
   { bodyWeight: 0, defaultRestSec: 90, customRestSec: null },
   DB.get('settings_v1', {})
 );
-function saveSettings() { DB.set('settings_v1', settings); }
+function saveSettings() { DB.set('settings_v1', settings); notifySaved('settings'); }
 
 function initSession() {
   const saved = DB.get('session_v2', {});
@@ -600,6 +600,7 @@ function openBoxModal() {
     if (outBtn) {
       const ex = exercises.find(x => x.id === +outBtn.dataset.boxOut);
       if (!ex) return;
+      if (!confirm(`「${ex.name}」を箱から出して、トレーニング画面に戻しますか？`)) return;
       outBtn.closest('.box-item').classList.add('box-item-leaving');
       setTimeout(() => {
         ex.benched = false;
@@ -1158,6 +1159,7 @@ function renderSettingsCard() {
           </button>
         </div>
       </div>
+      <div class="app-version" id="app-version">この端末のアプリの版：確認中…</div>
     </div>`;
 }
 
@@ -1504,6 +1506,15 @@ function bindEvents() {
     showToast('🗑 全データを削除しました'); render();
   });
 
+  // ── この端末で動いているアプリの版（Service Worker のキャッシュ名）
+  const verEl = document.getElementById('app-version');
+  if (verEl && window.caches) {
+    caches.keys().then(ks => {
+      const v = ks.filter(k => /^ironlog-v\d+$/.test(k)).sort((x, y) => +x.slice(9) - +y.slice(9)).pop();
+      verEl.textContent = `この端末のアプリの版：${v ? v.replace('ironlog-', '') : '不明'}`;
+    }).catch(() => {});
+  }
+
   // ── 設定：体重
   document.getElementById('set-bodyweight')?.addEventListener('change', (e) => {
     const v = Math.max(0, Math.min(300, parseFloat(e.target.value) || 0));
@@ -1641,6 +1652,10 @@ function bindEvents() {
     if (benchBtn) {
       const ex = exercises.find(x => x.id === +benchBtn.dataset.bench);
       if (!ex) return;
+      // 押し間違いでしまうと戻すのが手間なので、必ず確認する
+      if (!confirm(`「${ex.name}」を補欠ボックスにしまいますか？
+
+設定はそのまま残り、📦 からいつでも出せます。`)) return;
       flyIntoBox(benchBtn.closest('.ex-card'), () => {
         ex.benched = true;
         saveExercises(); renderExList();
@@ -2266,7 +2281,28 @@ document.addEventListener('visibilitychange', () => {
 //  PWA SERVICE WORKER
 // ================================================================
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js'); });
+  // ホーム画面のアプリは開きっぱなしで何日も読み直されないことがあり、
+  // 新しい版を配っても古い画面のまま使われ続けていた（片方の端末だけ「補欠へ」のまま、など）。
+  //   - 画面に戻るたびに新しい版が無いか確認する
+  //   - 新しい版が引き継いだら1回だけ読み直す（入力中の画面があるときは閉じるまで待つ）
+  const hadController = !!navigator.serviceWorker.controller;   // 初回インストールでは読み直さない
+  let reloading = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloading) return;
+    reloading = true;
+    const tryReload = () => {
+      if (document.querySelector('.modal-overlay')) { setTimeout(tryReload, 1500); return; }
+      location.reload();
+    };
+    tryReload();
+  });
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').then(reg => {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') reg.update().catch(() => {});
+      });
+    }).catch(() => {});
+  });
 }
 
 // ================================================================
@@ -2281,6 +2317,11 @@ window.IRONLOG = {
   getSettings:   () => settings,
 
   setExercises(v)  { exercises  = v || [];                          DB.set('exercises', exercises); },
+  setSettings(v)   {
+    settings = Object.assign({ bodyWeight: 0, defaultRestSec: 90, customRestSec: null }, v || {});
+    DB.set('settings_v1', settings);
+    refreshIdleTimers();
+  },
   setLogs(v)       { logs       = sortByDate(migrateLogs(v || [])); DB.set('logs', logs); },
   setCardioLogs(v) { cardioLogs = sortByDate(migrateCardio(v||[])); DB.set('cardioLogs', cardioLogs); },
 

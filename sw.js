@@ -1,6 +1,6 @@
 // ファイルを足したり中身を変えたら必ずこの版数を上げること。
 // 上げないと古いキャッシュが配られて変更が反映されない。
-const CACHE_NAME = 'ironlog-v16';
+const CACHE_NAME = 'ironlog-v17';
 const ASSETS = [
   './',
   './index.html',
@@ -14,7 +14,9 @@ const ASSETS = [
 
 self.addEventListener('install', (e) => {
   e.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS))
+    // cache: 'reload' … ブラウザ側の一時保存を通さず必ず取り直す。
+    // 通すと新しい版のキャッシュに古いファイルが入り、更新したのに古い画面のままになる
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS.map((u) => new Request(u, { cache: 'reload' }))))
   );
   self.skipWaiting();
 });

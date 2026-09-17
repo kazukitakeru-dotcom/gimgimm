@@ -19,7 +19,7 @@ iPhone のホーム画面に追加して使う。classic script なので `impor
 | キー | 中身 |
 |---|---|
 | `exercises` | 種目リスト `{id, name, weight, targetSets, presetWeights, restSec, bodyweight, bwRatio, benched}`。`benched` は補欠ボックスにしまってある印（トレーニング画面には出さず、上の📦から開くモーダルで出し入れ。並び替えはレギュラー同士だけで入れ替える） |
-| `settings_v1` | 共通設定 `{bodyWeight, defaultRestSec, customRestSec}`。**同期対象外（端末ごと）** |
+| `settings_v1` | 共通設定 `{bodyWeight, defaultRestSec, customRestSec}`。`ironlog_state` の doc に種目リストと一緒に入れて同期する |
 | `logs` | `{id, date:'YYYY-MM-DD', time:'HH:MM', entries, total}` を**新しい順**で |
 | `cardioLogs` | 有酸素。`minutes` が運動時間、`time` は記録時刻（別物） |
 | `session_v2` | 記録中のセット。保存すると空になる |
@@ -82,7 +82,15 @@ iPhone のホーム画面に追加して使う。classic script なので `impor
 わんにゃんメモリー・達人への道と**同じプロジェクトに相乗り**している
 （`https://kafaarlosuvqxxlxpvgg.supabase.co`）。publishable key は公開前提なのでソースに直書きでよい。
 
-- テーブル: `ironlog_state`（種目リスト・LWW）/ `ironlog_logs` / `ironlog_cardio`
+- テーブル: `ironlog_state`（doc に `{exercises, settings}`）/ `ironlog_logs` / `ironlog_cardio`
+- **種目リストと設定は「前回そろえた内容のハッシュ」との3者比較で決める**（`state.exHash` / `state.stHash`）。
+  サーバーだけ変わった→取り込む／この端末だけ変わった→送る／両方→この端末を優先して送る。
+  **ハッシュは必ず `_stable()`（キーを並べ替えた文字列）で取ること。** jsonb はキー順を保たないので、
+  キー順のまま取ると受け取った一覧を読み直しただけで「変更あり」と誤判定し、
+  他端末の変更（補欠にしまった等）を古い一覧で上書きし返していた（2026-09-17 に修正）
+- **doc は行ごと丸ごと置き換わる。種目リストと設定は必ず一緒に送る**（片方だけ送るともう片方が消える）
+- 古い版のまま動き続ける端末があると上の上書きが再発するので、`app.js` で画面に戻るたびに
+  Service Worker の更新を確認し、新しい版が引き継いだら1回読み直す。設定カードに端末の版を表示している
 - **アクセストークンの更新は必ず1本にまとめること（`_refreshing`）。** 更新トークンは1回使うと
   サーバー側で作り替えられ、古いものはその場で無効になる。同期は複数テーブルを `Promise.all` で
   取りに行くので、まとめないと同じトークンを同時に3回使い、1本だけ成功して残りが400になる。
