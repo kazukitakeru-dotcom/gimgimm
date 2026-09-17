@@ -18,7 +18,7 @@ iPhone のホーム画面に追加して使う。classic script なので `impor
 
 | キー | 中身 |
 |---|---|
-| `exercises` | 種目リスト `{id, name, weight, targetSets, presetWeights, restSec, bodyweight, bwRatio, benched}`。`benched` は補欠（画面の下にしまう。並び替えはレギュラー同士だけで入れ替える） |
+| `exercises` | 種目リスト `{id, name, weight, targetSets, presetWeights, restSec, bodyweight, bwRatio, benched}`。`benched` は補欠ボックスにしまってある印（トレーニング画面には出さず、上の📦から開くモーダルで出し入れ。並び替えはレギュラー同士だけで入れ替える） |
 | `settings_v1` | 共通設定 `{bodyWeight, defaultRestSec, customRestSec}`。**同期対象外（端末ごと）** |
 | `logs` | `{id, date:'YYYY-MM-DD', time:'HH:MM', entries, total}` を**新しい順**で |
 | `cardioLogs` | 有酸素。`minutes` が運動時間、`time` は記録時刻（別物） |

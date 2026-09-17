@@ -79,7 +79,7 @@ exercises = exercises.map(ex => ({
   restSec: null,        // null = 共通のレスト時間を使う
   bodyweight: false,    // 自重を加算するか（懸垂・腕立てなど）
   bwRatio: 100,         // 体重にかける割合(%)
-  benched: false,       // 補欠（トレーニング画面には出さず、下の補欠欄にしまっておく）
+  benched: false,       // 補欠ボックスにしまってある（トレーニング画面には出さない）
   ...ex
 }));
 
@@ -94,8 +94,6 @@ let logs       = sortByDate(migrateLogs(DB.get('logs', [])));
 let cardioLogs = sortByDate(migrateCardio(DB.get('cardioLogs', [])));
 let currentTab = 'workout';
 let isSortMode = false;
-let benchOpen  = false;   // 補欠欄を開いているか
-
 // レギュラー（トレーニング画面に出す種目）と補欠
 function regulars() { return exercises.filter(x => !x.benched); }
 function benchers() { return exercises.filter(x => x.benched); }
@@ -485,6 +483,7 @@ function renderWorkout() {
     ${carryOver}
     <div style="display: flex; gap: 10px; margin-bottom: 14px;">
       <button class="btn-add-exercise" id="btn-add-ex" style="margin-bottom: 0; flex: 1;">＋ 種目を追加</button>
+      <button class="btn-box" id="btn-box" title="補欠ボックス">${boxButtonInner()}</button>
       <button class="btn-sort-toggle${isSortMode ? ' active' : ''}" id="btn-toggle-sort">
         ${isSortMode ? '並び替え: ON' : '並び替え: OFF'}
       </button>
@@ -492,7 +491,6 @@ function renderWorkout() {
     <div id="ex-list">
       ${renderRegularList()}
     </div>
-    <div id="bench-list">${renderBench()}</div>
     ${previewHtml}
     <button class="btn-save-log" id="btn-save-log">
       💾 ${saveDate === today ? '今日' : mdw(saveDate)}のログを保存
@@ -517,35 +515,120 @@ function renderRegularList() {
   if (!list.length) {
     return `<div class="empty-regular">
       レギュラーの種目がありません。<br>
-      「＋ 種目を追加」するか、下の補欠から戻してください。
+      「＋ 種目を追加」するか、📦 補欠ボックスから出してください。
     </div>`;
   }
   return list.map((ex, idx) => renderExCard(ex, idx, list.length)).join('');
 }
 
-// 補欠欄。しばらくやらない種目を消さずにしまっておき、いつでもレギュラーに戻せる
-function renderBench() {
-  const list = benchers();
-  if (!list.length) return '';
-  return `
-    <div class="bench-card">
-      <button class="bench-head" data-bench-toggle="1">
-        <span>🪑 補欠</span>
-        <span class="bench-count">${list.length}</span>
-        <span class="bench-arrow">${benchOpen ? '▲' : '▼'}</span>
-      </button>
-      ${benchOpen ? list.map(ex => `
-        <div class="bench-row">
-          <div class="bench-info">
-            <div class="bench-name">${esc(ex.name)}</div>
-            <div class="bench-sub">${effectiveWeight(ex)} kg ・ 目標 ${ex.targetSets || 3} セット</div>
-          </div>
-          <button class="btn-unbench" data-unbench="${ex.id}">↑ 戻す</button>
-          <button class="btn-icon" data-edit="${ex.id}">✏️</button>
-          <button class="btn-icon danger" data-delete="${ex.id}">🗑</button>
+// ── 補欠ボックス ─────────────────────────────────────────────────
+//   しばらくやらない種目を、消さずに「箱にしまう」。
+//   トレーニング画面には出さず、箱を開いたときだけ中身が見える。
+//   設定（重量・目標セット・レスト・自重）はそのまま残るので、出せば元どおり使える。
+function boxButtonInner() {
+  const n = benchers().length;
+  return `📦${n ? `<span class="btn-box-count">${n}</span>` : ''}`;
+}
+
+// 種目カードが箱に吸い込まれていく動き。終わったら done を呼ぶ
+function flyIntoBox(card, done) {
+  const box = document.getElementById('btn-box');
+  const reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (!card || !box || reduce) { done(); return; }
+  const c = card.getBoundingClientRect(), b = box.getBoundingClientRect();
+  const dx = (b.left + b.width / 2) - (c.left + c.width / 2);
+  const dy = (b.top + b.height / 2) - (c.top + c.height / 2);
+  card.style.pointerEvents   = 'none';
+  card.style.transformOrigin = 'center';
+  card.style.transition      = 'transform .42s cubic-bezier(.55,0,.8,.2), opacity .42s ease-in';
+  requestAnimationFrame(() => {
+    card.style.transform = `translate(${dx}px, ${dy}px) scale(0.1)`;
+    card.style.opacity   = '0.15';
+  });
+  setTimeout(() => {
+    done();
+    const btn = document.getElementById('btn-box');
+    if (btn) { btn.classList.remove('box-bump'); void btn.offsetWidth; btn.classList.add('box-bump'); }
+  }, 420);
+}
+
+function openBoxModal() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  document.body.appendChild(overlay);
+
+  function paint() {
+    const list = benchers();
+    overlay.innerHTML = `
+      <div class="modal-sheet box-sheet">
+        <div class="modal-pill"></div>
+        <div class="modal-title">📦 補欠ボックス</div>
+        <div class="setting-help">
+          しばらくやらない種目をしまっておく箱です。
+          設定はそのまま残るので、「出す」でいつでもトレーニング画面に戻せます。
         </div>
-      `).join('') : ''}
-    </div>`;
+        ${list.length ? `
+          <div class="box-items">
+            ${list.map(ex => `
+              <div class="box-item">
+                <div class="box-item-info">
+                  <div class="box-item-name">${esc(ex.name)}</div>
+                  <div class="box-item-sub">${effectiveWeight(ex)} kg ・ 目標 ${ex.targetSets || 3} セット</div>
+                </div>
+                <button class="btn-box-out" data-box-out="${ex.id}">出す</button>
+                <button class="btn-icon" data-box-edit="${ex.id}" title="編集">✏️</button>
+                <button class="btn-icon danger" data-box-del="${ex.id}" title="削除">🗑</button>
+              </div>
+            `).join('')}
+          </div>` : `
+          <div class="box-empty">
+            <div class="box-empty-icon">📦</div>
+            箱は空です。<br>種目カードの「しまう」で入れられます。
+          </div>`}
+        <div class="modal-btn-row">
+          <button class="btn-confirm" data-box-close="1">閉じる</button>
+        </div>
+      </div>`;
+  }
+  paint();
+
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay || e.target.closest('[data-box-close]')) { overlay.remove(); return; }
+
+    // 出す：箱から出ていく動きのあと、トレーニング画面に戻す。続けて出せるよう箱は開いたまま
+    const outBtn = e.target.closest('[data-box-out]');
+    if (outBtn) {
+      const ex = exercises.find(x => x.id === +outBtn.dataset.boxOut);
+      if (!ex) return;
+      outBtn.closest('.box-item').classList.add('box-item-leaving');
+      setTimeout(() => {
+        ex.benched = false;
+        saveExercises(); renderExList(); paint();
+        showToast(`💪 ${ex.name} を箱から出しました`);
+      }, 260);
+      return;
+    }
+
+    const editBtn = e.target.closest('[data-box-edit]');
+    if (editBtn) {
+      const ex = exercises.find(x => x.id === +editBtn.dataset.boxEdit);
+      overlay.remove();
+      if (ex) openModal(ex);
+      return;
+    }
+
+    const delBtn = e.target.closest('[data-box-del]');
+    if (delBtn) {
+      const id = +delBtn.dataset.boxDel;
+      if (!confirm('この種目を削除しますか？（箱から出すのではなく、完全に消えます）')) return;
+      exercises = exercises.filter(x => x.id !== id);
+      saveExercises();
+      delete session[id]; saveSession();
+      clearInterval(timerIntervals[id]);
+      renderExList(); paint();
+      return;
+    }
+  });
 }
 
 function renderExCard(ex, index, count) {
@@ -571,7 +654,7 @@ function renderExCard(ex, index, count) {
           <button class="btn-icon" data-move-up="${ex.id}" ${index === 0 ? 'disabled' : ''}>↑</button>
           <button class="btn-icon" data-move-down="${ex.id}" ${index === count - 1 ? 'disabled' : ''}>↓</button>
         ` : ''}
-        <button class="btn-bench" data-bench="${ex.id}" title="補欠にする">補欠へ</button>
+        <button class="btn-bench" data-bench="${ex.id}" title="補欠ボックスにしまう">📦しまう</button>
         <button class="btn-icon" data-edit="${ex.id}">✏️</button>
         <button class="btn-icon danger" data-delete="${ex.id}">🗑</button>
         <button class="btn-icon" data-toggle="${ex.id}">${sess.open ? '▲' : '▼'}</button>
@@ -1343,6 +1426,7 @@ function bindEvents() {
   // ── Workout
   document.getElementById('btn-add-ex')?.addEventListener('click', () => openModal());
   document.getElementById('btn-toggle-sort')?.addEventListener('click', () => { isSortMode = !isSortMode; render(); });
+  document.getElementById('btn-box')?.addEventListener('click', openBoxModal);
   document.getElementById('btn-save-log')?.addEventListener('click', saveLog);
 
   // ── HIIT
@@ -1552,32 +1636,16 @@ function bindEvents() {
       return;
     }
 
-    // 補欠にする（消さずにしまう）
+    // 補欠ボックスにしまう（消さずにしまう）
     const benchBtn = e.target.closest('[data-bench]');
     if (benchBtn) {
       const ex = exercises.find(x => x.id === +benchBtn.dataset.bench);
       if (!ex) return;
-      ex.benched = true;
-      saveExercises(); renderExList();
-      showToast(`🪑 ${ex.name} を補欠にしました（下の補欠から戻せます）`);
-      return;
-    }
-
-    // レギュラーに戻す
-    const unbenchBtn = e.target.closest('[data-unbench]');
-    if (unbenchBtn) {
-      const ex = exercises.find(x => x.id === +unbenchBtn.dataset.unbench);
-      if (!ex) return;
-      ex.benched = false;
-      saveExercises(); renderExList();
-      showToast(`💪 ${ex.name} をレギュラーに戻しました`);
-      return;
-    }
-
-    // 補欠欄を開く／閉じる
-    if (e.target.closest('[data-bench-toggle]')) {
-      benchOpen = !benchOpen;
-      renderExList();
+      flyIntoBox(benchBtn.closest('.ex-card'), () => {
+        ex.benched = true;
+        saveExercises(); renderExList();
+        showToast(`📦 ${ex.name} を補欠ボックスにしまいました`);
+      });
       return;
     }
 
@@ -1738,8 +1806,8 @@ function renderExList() {
   const list = document.getElementById('ex-list');
   if (!list) return;
   list.innerHTML = renderRegularList();
-  const bench = document.getElementById('bench-list');
-  if (bench) bench.innerHTML = renderBench();
+  const boxBtn = document.getElementById('btn-box');
+  if (boxBtn) boxBtn.innerHTML = boxButtonInner();
 
   // Update preview card
   const previewEntries = buildPreviewEntries();
