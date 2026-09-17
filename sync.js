@@ -31,14 +31,22 @@ function sbLoadSession() {
     // これがあるので、共通化のためにログインし直す必要はない。
     if (!raw) {
       const old = localStorage.getItem(LEGACY_SESSION_KEY);
-      if (old) { localStorage.setItem(SESSION_KEY, old); raw = old; }
+      // 引き継いだら古いほうは必ず消す。残すとログアウトした瞬間に古いログイン情報が
+      // ここから復活し、何週間も前の更新トークンを使ってサーバーにログインごと無効にされていた
+      if (old) { localStorage.setItem(SESSION_KEY, old); localStorage.removeItem(LEGACY_SESSION_KEY); raw = old; }
     }
     return JSON.parse(raw || 'null');
   } catch (e) { return null; }
 }
+/* アプリごとに分かれていた頃のログイン情報の置き場所。6アプリは同じオリジンで保存先を共有しているので、
+   どのアプリの古いキーが残っていても、ログアウトや失効のあとに古いログイン情報が復活してしまう。
+   ログインした時もログアウトした時も、全部まとめて消す。 */
+const LEGACY_SESSION_KEYS = ['ironlog_session_v1', 'wannyan_session_v1', 'uruoi_session_v1', 'qest_session_v1', 'kaimono_session_v1'];
+
 function sbSaveSession(s) {
   if (s) localStorage.setItem(SESSION_KEY, JSON.stringify(s));
   else localStorage.removeItem(SESSION_KEY);
+  LEGACY_SESSION_KEYS.forEach(k => { try { localStorage.removeItem(k); } catch (e) {} });
 }
 function sbIsLoggedIn() { return !!(sbLoadSession() || {}).refresh_token; }
 
