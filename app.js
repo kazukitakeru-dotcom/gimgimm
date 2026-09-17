@@ -2073,6 +2073,8 @@ function openModal(ex = null) {
             ${st.nameLocked ? 'readonly' : ''} style="margin-bottom:0;flex:1" />
           ${st.nameLocked ? `<button class="btn-name-unlock" data-name-unlock="1">✏️ 変更</button>` : ''}
         </div>
+        ${isEdit && !st.nameLocked ? `
+          <div class="name-original">元の名前：<strong>${esc(ex.name)}</strong><br>これまでのログは元の名前のまま残ります</div>` : ''}
 
         <label class="form-label" style="margin-top:16px">自重を加算</label>
         <div class="bw-toggle-row">
@@ -2158,7 +2160,9 @@ function openModal(ex = null) {
 
     if (e.target.closest('[data-name-unlock]')) {
       capture(); st.nameLocked = false; paint();
-      const inp = overlay.querySelector('#modal-name'); inp.focus(); inp.select();
+      // 全選択にすると1文字目で元の名前が丸ごと消えて、見ながら直せなかった。末尾にカーソルを置く
+      const inp = overlay.querySelector('#modal-name'); inp.focus();
+      const end = inp.value.length; inp.setSelectionRange(end, end);
       return;
     }
 

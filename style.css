@@ -1736,3 +1736,12 @@ button {
   color: var(--muted);
   text-align: right;
 }
+
+/* 種目名を変更中に、元の名前を見比べられるようにする */
+.name-original {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted2);
+}
+.name-original strong { color: var(--text); font-weight: 700; }
