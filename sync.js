@@ -395,12 +395,18 @@ function _applyRemoteState(state, row) {
   const remote = _remoteStateDoc(row && row.doc);
   state.remoteDocHash = row ? _hash(_stable(remote)) : null;
   const local  = _localStateDoc();
-  // 新しい端末に最初から入っている見本の3種目（一度も触っていないもの）は、
-  // サーバーに種目があるならそちらを使う。混ぜると全端末の一覧に見本が紛れ込む
+  // 新しい端末に最初から入っている見本の3種目（一度も触っていないもの）は、初めての同期に限り、
+  // サーバーに無ければ混ぜない（混ぜると全端末の一覧に見本が紛れ込む）。
+  // 見本をそのまま使い続けている本物の種目（例：番号1のベンチプレス）もあるので、
+  // 同期済みの端末や、サーバーに同じ番号がある場合は除外しない。
+  // 以前は常に除外していたため、本物のベンチプレスが同期のたびに一番下へ回されていた。
   const SEED = { 1: 'ベンチプレス', 2: 'スクワット', 3: 'デッドリフト' };
-  if (remote.exercises.length) {
-    local.exercises = local.exercises.filter(x => x.updatedAt || SEED[x.id] !== x.name);
+  const firstSync = !state.lastSyncedAt && !state.remoteDocHashSeen;
+  if (firstSync && remote.exercises.length) {
+    const remoteIds = new Set(remote.exercises.map(x => String(x.id)));
+    local.exercises = local.exercises.filter(x => x.updatedAt || SEED[x.id] !== x.name || remoteIds.has(String(x.id)));
   }
+  if (row) state.remoteDocHashSeen = true;
   const merged = _mergeStateDocs(local, remote);
   let changed = false;
   if (_exHash(merged.exercises) !== _exHash(I.getExercises())) { I.setExercises(merged.exercises); changed = true; }
