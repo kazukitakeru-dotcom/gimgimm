@@ -117,7 +117,52 @@ let settings = Object.assign(
   { bodyWeight: 0, defaultRestSec: 90, customRestSec: null },
   DB.get('settings_v1', {})
 );
-function saveSettings() { DB.set('settings_v1', settings); notifySaved('settings'); }
+function saveSettings() { stampSettings(); DB.set('settings_v1', settings); notifySaved('settings'); }
+
+// ── 同期用の「いつ変えたか」の記録 ─────────────────────────────────
+//   同期は種目1件ずつ・設定1項目ずつ「新しく変えたほう」を採る。そのために、
+//   保存のたびに前回との差を見て、変わった種目に updatedAt、消えた種目に墓標、
+//   並び順を変えたら exOrderAt、変わった設定項目に settingsAt[項目] を記録する。
+//   一覧まるごと上書きしていた頃は、片方の端末で足した種目が、
+//   もう片方で別の種目を触っただけで消えていた。
+function _exKey(ex) {
+  const o = {};
+  Object.keys(ex).filter(k => k !== 'updatedAt').sort().forEach(k => { o[k] = ex[k]; });
+  return JSON.stringify(o);
+}
+function _exSnapOf(list) {
+  const m = {};
+  (list || []).forEach(ex => { m[String(ex.id)] = _exKey(ex); });
+  return m;
+}
+const _exOrderOf = list => (list || []).map(x => String(x.id)).join(',');
+let _exSnap     = _exSnapOf(exercises);
+let _exOrder    = _exOrderOf(exercises);
+let _stSnap     = JSON.stringify(settings);
+
+function stampExercises() {
+  const now  = Date.now();
+  const cur  = _exSnapOf(exercises);
+  exercises.forEach(ex => { if (_exSnap[String(ex.id)] !== cur[String(ex.id)]) ex.updatedAt = now; });
+  const tomb = DB.get('exTombstones_v1', {});
+  let tombChanged = false;
+  Object.keys(_exSnap).forEach(id => { if (!(id in cur)) { tomb[id] = now; tombChanged = true; } });
+  if (tombChanged) DB.set('exTombstones_v1', tomb);
+  const order = _exOrderOf(exercises);
+  if (order !== _exOrder) DB.set('exOrderAt_v1', now);
+  _exSnap = _exSnapOf(exercises); _exOrder = order;
+}
+function stampSettings() {
+  const prev = JSON.parse(_stSnap || '{}');
+  const at   = DB.get('settingsAt_v1', {});
+  const now  = Date.now();
+  let dirty = false;
+  Object.keys(settings).forEach(k => {
+    if (JSON.stringify(prev[k]) !== JSON.stringify(settings[k])) { at[k] = now; dirty = true; }
+  });
+  if (dirty) DB.set('settingsAt_v1', at);
+  _stSnap = JSON.stringify(settings);
+}
 
 function initSession() {
   const saved = DB.get('session_v2', {});
@@ -307,7 +352,7 @@ function migrateCardio(list) {
   });
 }
 
-function saveExercises()  { DB.set('exercises', exercises); notifySaved('exercises'); }
+function saveExercises()  { stampExercises(); DB.set('exercises', exercises); notifySaved('exercises'); }
 function saveLogs()       { logs = sortByDate(logs); DB.set('logs', logs); notifySaved('logs'); }
 function saveCardioLogs() { cardioLogs = sortByDate(cardioLogs); DB.set('cardioLogs', cardioLogs); notifySaved('cardio'); }
 function saveSessionMeta(){ DB.set('sessionMeta_v1', sessionMeta); }
@@ -552,13 +597,33 @@ function flyIntoBox(card, done) {
   }, 420);
 }
 
+// ログには残っているのに、種目一覧（レギュラー・補欠のどちらにも）無い種目。
+// 同期で消えてしまった種目や、以前に削除した種目を拾い直すために使う
+function lostExercisesFromLogs() {
+  const have = new Set(exercises.map(x => x.name));
+  const found = new Map();   // 名前 → いちばん新しい記録
+  logs.forEach(l => (l.entries || []).forEach(e => {
+    if (!e.name || have.has(e.name)) return;
+    const cur = found.get(e.name);
+    const key = (l.date || '') + ' ' + (l.time || '');
+    if (!cur || key > cur.key) found.set(e.name, { key, date: l.date, entry: e });
+  }));
+  return [...found.values()].sort((x, y) => y.key.localeCompare(x.key)).map(({ date, entry }) => {
+    const ws = (entry.setList || []).map(s => s.weight).filter(w => typeof w === 'number');
+    const weight = ws.length ? ws[ws.length - 1] : (entry.sets ? Math.round((entry.total || 0) / entry.sets * 10) / 10 : 0);
+    return { name: entry.name, weight, sets: entry.sets || 3, date };
+  });
+}
+
 function openBoxModal() {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   document.body.appendChild(overlay);
 
+  let lost = [];
   function paint() {
     const list = benchers();
+    lost = lostExercisesFromLogs();
     overlay.innerHTML = `
       <div class="modal-sheet box-sheet">
         <div class="modal-pill"></div>
@@ -585,6 +650,23 @@ function openBoxModal() {
             <div class="box-empty-icon">📦</div>
             箱は空です。<br>種目カードの「しまう」で入れられます。
           </div>`}
+        ${lost.length ? `
+          <div class="box-lost">
+            <div class="box-lost-title">🔎 ログにはあるのに一覧に無い種目</div>
+            <div class="setting-help">
+              同期で消えてしまった種目や、以前に削除した種目です。
+              最後に記録したときの重量で箱に戻せます（自重・レスト時間などの設定は戻りません）。
+            </div>
+            ${lost.map((x, i) => `
+              <div class="box-item">
+                <div class="box-item-info">
+                  <div class="box-item-name">${esc(x.name)}</div>
+                  <div class="box-item-sub">最後の記録 ${esc(x.date || '—')} ・ ${x.weight} kg × ${x.sets} セット</div>
+                </div>
+                <button class="btn-box-out" data-box-restore="${i}">箱に戻す</button>
+              </div>
+            `).join('')}
+          </div>` : ''}
         <div class="modal-btn-row">
           <button class="btn-confirm" data-box-close="1">閉じる</button>
         </div>
@@ -607,6 +689,20 @@ function openBoxModal() {
         saveExercises(); renderExList(); paint();
         showToast(`💪 ${ex.name} を箱から出しました`);
       }, 260);
+      return;
+    }
+
+    // ログから拾い直した種目を箱に戻す
+    const restoreBtn = e.target.closest('[data-box-restore]');
+    if (restoreBtn) {
+      const x = lost[+restoreBtn.dataset.boxRestore];
+      if (!x) return;
+      exercises.push({
+        id: uid(), name: x.name, weight: x.weight, targetSets: x.sets, presetWeights: [x.weight],
+        restSec: null, bodyweight: false, bwRatio: 100, benched: true,
+      });
+      saveExercises(); renderExList(); paint();
+      showToast(`📦 ${x.name} を箱に戻しました`);
       return;
     }
 
@@ -2328,10 +2424,20 @@ window.IRONLOG = {
   getCardioLogs: () => cardioLogs,
   getSettings:   () => settings,
 
-  setExercises(v)  { exercises  = v || [];                          DB.set('exercises', exercises); },
-  setSettings(v)   {
+  setExercises(v)  {
+    exercises = v || [];
+    DB.set('exercises', exercises);
+    _exSnap = _exSnapOf(exercises); _exOrder = _exOrderOf(exercises);
+  },
+  getExTombstones: () => DB.get('exTombstones_v1', {}),
+  getExOrderAt:    () => DB.get('exOrderAt_v1', 0),
+  setExMeta(tomb, orderAt) { DB.set('exTombstones_v1', tomb || {}); DB.set('exOrderAt_v1', orderAt || 0); },
+  getSettingsAt:   () => DB.get('settingsAt_v1', {}),
+  setSettings(v, at) {
     settings = Object.assign({ bodyWeight: 0, defaultRestSec: 90, customRestSec: null }, v || {});
     DB.set('settings_v1', settings);
+    if (at) DB.set('settingsAt_v1', at);
+    _stSnap = JSON.stringify(settings);
     refreshIdleTimers();
   },
   setLogs(v)       { logs       = sortByDate(migrateLogs(v || [])); DB.set('logs', logs); },

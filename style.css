@@ -1745,3 +1745,17 @@ button {
   color: var(--muted2);
 }
 .name-original strong { color: var(--text); font-weight: 700; }
+
+/* 補欠ボックス：ログにはあるのに一覧に無い種目 */
+.box-lost {
+  margin: 14px 0 6px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+.box-lost-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent2);
+  margin-bottom: 4px;
+}
+.box-lost .box-item { margin-bottom: 8px; }

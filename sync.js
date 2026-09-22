@@ -240,7 +240,7 @@ async function _rest(path, { method = 'GET', body = null, prefer = null } = {}) 
     const t = await res.text().catch(() => '');
     throw new Error(sbMessage(t) || `${res.status}`);
   }
-  return method === 'GET' ? res.json() : null;
+  return (method === 'GET' || /return=representation/.test(prefer || '')) ? res.json() : null;
 }
 
 // 1回のGETには件数上限があるので、全部取れるまでページを送る。
@@ -291,7 +291,7 @@ function _loadSyncState() {
       return s;
     }
   } catch {}
-  return { lastPulledAt: null, logs: {}, cardio: {}, exHash: null, exHashStable: true, stHash: null,
+  return { lastPulledAt: null, logs: {}, cardio: {}, stateRowAt: null, remoteDocHash: null,
            touched: {}, serverTimeMigrated: true };
 }
 function _saveSyncState(s) {
@@ -319,7 +319,7 @@ async function syncNow(opts = {}) {
   try {
     const state = _loadSyncState();
     changed = await _pull(state);
-    await _push(state);
+    if (await _push(state)) changed = true;
     state.lastSyncedAt = Date.now();
     _saveSyncState(state);
     _lastSyncError = null;
@@ -332,6 +332,104 @@ async function syncNow(opts = {}) {
     if (changed) window.IRONLOG.rerender();   // rerender の中で updateSyncUI が呼ばれる
     else updateSyncUI();
   }
+}
+
+
+/* ── 種目リストと設定のマージ ─────────────────────────────────────────────
+   一覧まるごと「新しく同期したほう」で上書きしていたため、片方の端末で足した種目や
+   しまった印が、もう片方で別の種目を触っただけで消えていた（2026-09-22）。
+   種目は1件ずつ、設定は1項目ずつ、あとから変えたほうを採る。
+     - 種目: updatedAt が大きいほう。同じなら（変更記録の無い古いデータ同士）サーバー
+     - 消した種目: 墓標（exDeleted）の時刻がその種目の updatedAt 以降なら消す
+     - 並び順: exOrderAt が新しいほうの並びを基本に、足りない種目を後ろへ
+     - 設定: settingsAt[項目] が大きいほう。同じならサーバーに値があればサーバー */
+function _localStateDoc() {
+  const I = window.IRONLOG;
+  return { exercises: I.getExercises(), exDeleted: I.getExTombstones(), exOrderAt: I.getExOrderAt(),
+           settings: I.getSettings(), settingsAt: I.getSettingsAt() };
+}
+function _remoteStateDoc(doc) {
+  doc = doc || {};
+  return { exercises: Array.isArray(doc.exercises) ? doc.exercises : [], exDeleted: doc.exDeleted || {},
+           exOrderAt: doc.exOrderAt || 0, settings: doc.settings || null, settingsAt: doc.settingsAt || {} };
+}
+function _mergeStateDocs(a, b) {   // a = この端末、b = サーバー
+  const tomb = Object.assign({}, b.exDeleted);
+  Object.entries(a.exDeleted || {}).forEach(([id, t]) => { if (!(tomb[id] >= t)) tomb[id] = t; });
+
+  const byId = new Map();
+  b.exercises.forEach(ex => byId.set(String(ex.id), ex));
+  a.exercises.forEach(ex => {
+    const id = String(ex.id), cur = byId.get(id);
+    if (!cur || (ex.updatedAt || 0) > (cur.updatedAt || 0)) byId.set(id, ex);
+  });
+  for (const [id, ex] of [...byId]) {
+    if (tomb[id] != null && tomb[id] >= (ex.updatedAt || 0)) byId.delete(id);
+  }
+  const first  = (b.exOrderAt || 0) > (a.exOrderAt || 0) ? b : a;
+  const second = first === a ? b : a;
+  const exercises = [], seen = new Set();
+  [...first.exercises, ...second.exercises].forEach(ex => {
+    const id = String(ex.id);
+    if (byId.has(id) && !seen.has(id)) { seen.add(id); exercises.push(byId.get(id)); }
+  });
+
+  const as = a.settings || {}, bs = b.settings || {};
+  const settings = {}, settingsAt = {};
+  new Set([...Object.keys(as), ...Object.keys(bs)]).forEach(k => {
+    const ta = (a.settingsAt || {})[k] || 0, tb = (b.settingsAt || {})[k] || 0;
+    const bSet = bs[k] != null && bs[k] !== 0 && bs[k] !== '';
+    const useB = !(k in as) || tb > ta || (tb === ta && bSet && (k in bs));
+    settings[k]   = useB ? bs[k] : as[k];
+    settingsAt[k] = Math.max(ta, tb);
+  });
+
+  return { exercises, exDeleted: tomb, exOrderAt: Math.max(a.exOrderAt || 0, b.exOrderAt || 0),
+           settings, settingsAt };
+}
+
+/* サーバーの行を手元に取り込む。手元が変わったら true */
+function _applyRemoteState(state, row) {
+  const I = window.IRONLOG;
+  state.stateRowAt = row ? row.updated_at : null;
+  const remote = _remoteStateDoc(row && row.doc);
+  state.remoteDocHash = row ? _hash(_stable(remote)) : null;
+  const local  = _localStateDoc();
+  // 新しい端末に最初から入っている見本の3種目（一度も触っていないもの）は、
+  // サーバーに種目があるならそちらを使う。混ぜると全端末の一覧に見本が紛れ込む
+  const SEED = { 1: 'ベンチプレス', 2: 'スクワット', 3: 'デッドリフト' };
+  if (remote.exercises.length) {
+    local.exercises = local.exercises.filter(x => x.updatedAt || SEED[x.id] !== x.name);
+  }
+  const merged = _mergeStateDocs(local, remote);
+  let changed = false;
+  if (_exHash(merged.exercises) !== _exHash(I.getExercises())) { I.setExercises(merged.exercises); changed = true; }
+  I.setExMeta(merged.exDeleted, merged.exOrderAt);
+  if (_hash(_stable(merged.settings)) !== _hash(_stable(local.settings))) {
+    I.setSettings(merged.settings, merged.settingsAt); changed = true;
+  } else {
+    I.setSettings(local.settings, merged.settingsAt);
+  }
+  return changed;
+}
+
+/* 行を書き込む。前回読んだあとで他の端末が書いていたら false（書かない）。
+   読んでから書くまでの間に他の端末が書いた内容を、黙って上書きしないため。 */
+async function _writeState(state, doc, userId) {
+  if (state.stateRowAt) {
+    const rows = await _rest(`ironlog_state?user_id=eq.${userId}&updated_at=eq.${encodeURIComponent(state.stateRowAt)}`, {
+      method: 'PATCH', prefer: 'return=representation', body: { doc },
+    });
+    if (!rows || !rows.length) return false;
+    state.stateRowAt = rows[0].updated_at;
+    return true;
+  }
+  const rows = await _rest('ironlog_state?on_conflict=user_id', {
+    method: 'POST', prefer: 'resolution=merge-duplicates,return=representation',
+    body: [{ user_id: userId, doc }],
+  });
+  state.stateRowAt = rows && rows[0] ? rows[0].updated_at : null;
+  return true;
 }
 
 /* ---- 取得 ---- */
@@ -347,73 +445,8 @@ async function _pull(state) {
   const bump = ts => { if (ts && (!newest || ts > newest)) newest = ts; };
   let changed = false;
 
-  /* --- 種目リスト（補欠ボックスの印・レスト時間・自重の設定もこの中） ---
-     前回そろえた内容（state.exHash）と比べて、どちらが変わったかで決める。
-       - サーバーだけ変わった → 取り込む
-       - この端末だけ変わった → 送信側で送る
-       - 両方変わった         → この端末を優先して送る
-
-     以前は「サーバーの更新時刻 > この端末の時計で覚えた時刻」で判定し、ハッシュもキー順のまま
-     取っていた。jsonb はキーの順番を保たないので、受け取った種目リストをアプリが読み直した時点で
-     並びが変わって「この端末で変更あり」と誤判定し、他端末の変更を取り込まずに
-     古い一覧で上書きし返していた（補欠にしても別の端末に反映されない）。 */
-  const row = stateRows && stateRows[0];
-  if (row && row.doc && Array.isArray(row.doc.exercises)) {
-    const local   = window.IRONLOG.getExercises();
-    const remote  = row.doc.exercises;
-    const localH  = _exHash(local);
-    const remoteH = _exHash(remote);
-
-    // キー順のまま取っていた旧ハッシュからの移行（1回だけ）。
-    // 旧ハッシュと手元がそのまま一致すれば「変えていない」と分かる。一致しなければ
-    // 並び順の誤判定か本当の変更か区別できないので、初回と同じくサーバーを基本にそろえる。
-    if (!state.exHashStable) {
-      if (state.exHash !== null) {
-        state.exHash = (state.exHash === _hash(JSON.stringify(local))) ? localH : null;
-      }
-      state.exHashStable = true;
-    }
-
-    if (state.exHash === null) {
-      // 初回。サーバーの内容を基本に、この端末にしかない種目を足す
-      const ids  = new Set(remote.map(x => String(x.id)));
-      const next = [...remote, ...local.filter(x => !ids.has(String(x.id)))];
-      if (_exHash(next) !== localH) { window.IRONLOG.setExercises(next); changed = true; }
-      state.exHash = remoteH;   // 足した種目があれば、送信側でサーバーとの差として送られる
-    } else if (remoteH !== state.exHash && localH === state.exHash) {
-      window.IRONLOG.setExercises(remote);
-      state.exHash = remoteH;
-      changed = true;
-    }
-  }
-
-  /* --- 設定（体重・既定のレスト時間） ---
-     種目リストと同じく、前回そろえた内容（state.stHash）と比べてどちらが変わったかで決める。
-     以前は同期しておらず、ある端末で体重を入れても他の端末では 0kg のままだった。 */
-  if (row && row.doc) {
-    const remoteS = row.doc.settings;
-    if (remoteS && typeof remoteS === 'object') {
-      const localS  = window.IRONLOG.getSettings();
-      const localH  = _hash(_stable(localS));
-      const remoteH = _hash(_stable(remoteS));
-      if (state.stHash == null) {
-        // 初回。サーバーを基本にしつつ、サーバーが未設定でこの端末だけ入れてある値は残す
-        const next = Object.assign({}, remoteS);
-        if (!next.bodyWeight && localS.bodyWeight) next.bodyWeight = localS.bodyWeight;
-        if (next.customRestSec == null && localS.customRestSec != null) next.customRestSec = localS.customRestSec;
-        if (_hash(_stable(next)) !== localH) { window.IRONLOG.setSettings(next); changed = true; }
-        state.stHash = remoteH;   // 残した値があれば、送信側でサーバーとの差として送られる
-      } else if (remoteH !== state.stHash && localH === state.stHash) {
-        window.IRONLOG.setSettings(remoteS);
-        state.stHash = remoteH;
-        changed = true;
-      }
-    } else {
-      // サーバーに設定が無い（まだ誰も送っていない／旧版の端末が種目リストだけ送って消した）。
-      // この端末の設定を送り直させる
-      state.stHash = null;
-    }
-  }
+  /* --- 種目リストと設定（1件ずつ・1項目ずつマージ） --- */
+  if (_applyRemoteState(state, stateRows && stateRows[0])) changed = true;
 
   /* --- 筋トレのログ --- */
   if (logRows && logRows.length) {
@@ -484,23 +517,18 @@ async function _push(state) {
   const userId = (sbLoadSession() || {}).user_id;
   if (!userId) throw new Error('ユーザーIDが取れません');
 
-  /* --- 種目リスト --- */
-  const exercises = window.IRONLOG.getExercises();
-  const settings  = window.IRONLOG.getSettings();
-  const exHash = _exHash(exercises);
-  const stHash = _hash(_stable(settings));
-  // doc は行ごと丸ごと置き換わるので、種目リストと設定は必ず一緒に送る
-  // （片方だけ送ると、もう片方がサーバーから消える）
-  if (state.exHash !== exHash || state.stHash !== stHash) {
-    await _rest('ironlog_state?on_conflict=user_id', {
-      method: 'POST',
-      prefer: 'resolution=merge-duplicates,return=minimal',
-      // updated_at は送らない。サーバー側のトリガが now() を入れる。
-      body: [{ user_id: userId, doc: { exercises, settings } }],
-    });
-    state.exHash = exHash;
-    state.exHashStable = true;
-    state.stHash = stHash;
+  /* --- 種目リストと設定 ---
+     マージ済みの手元がサーバーと違えば書く。書く直前に他の端末が書いていたら、
+     読み直してもう一度マージしてから書く（最大3回）。
+     doc は丸ごと置き換わるので、種目・墓標・並び順・設定は必ず一緒に送る。 */
+  let changed = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const doc = _localStateDoc();
+    const h = _hash(_stable(doc));
+    if (h === state.remoteDocHash) break;
+    if (await _writeState(state, doc, userId)) { state.remoteDocHash = h; break; }
+    const rows = await _rest('ironlog_state?select=doc,updated_at&limit=1');
+    if (_applyRemoteState(state, rows && rows[0])) changed = true;
   }
 
   /* --- 筋トレのログ --- */
@@ -560,6 +588,7 @@ async function _push(state) {
     else state.cardio[r.id] = _hash(JSON.stringify({ ...r.data, id: r.id, date: r.date, time: r.clock }));
     delete state.touched['c:' + r.id];
   });
+  return changed;
 }
 
 /* ── app.js からの保存通知 ────────────────────────────────────────────── */
