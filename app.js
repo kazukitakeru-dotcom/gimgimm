@@ -125,14 +125,15 @@ function saveSettings() { stampSettings(); DB.set('settings_v1', settings); noti
 //   並び順を変えたら exOrderAt、変わった設定項目に settingsAt[項目] を記録する。
 //   一覧まるごと上書きしていた頃は、片方の端末で足した種目が、
 //   もう片方で別の種目を触っただけで消えていた。
-function _exKey(ex) {
+// 種目の中身を項目ごとの文字列にしたもの（変更の記録用の updatedAt / fieldAt は除く）
+function _exFields(ex) {
   const o = {};
-  Object.keys(ex).filter(k => k !== 'updatedAt').sort().forEach(k => { o[k] = ex[k]; });
-  return JSON.stringify(o);
+  Object.keys(ex).filter(k => k !== 'updatedAt' && k !== 'fieldAt').forEach(k => { o[k] = JSON.stringify(ex[k]); });
+  return o;
 }
 function _exSnapOf(list) {
   const m = {};
-  (list || []).forEach(ex => { m[String(ex.id)] = _exKey(ex); });
+  (list || []).forEach(ex => { m[String(ex.id)] = _exFields(ex); });
   return m;
 }
 const _exOrderOf = list => (list || []).map(x => String(x.id)).join(',');
@@ -143,7 +144,18 @@ let _stSnap     = JSON.stringify(settings);
 function stampExercises() {
   const now  = Date.now();
   const cur  = _exSnapOf(exercises);
-  exercises.forEach(ex => { if (_exSnap[String(ex.id)] !== cur[String(ex.id)]) ex.updatedAt = now; });
+  // 変わった項目ごとに時刻を付ける（同じ種目を2台で変えても、別々の項目なら両方残せるように）
+  exercises.forEach(ex => {
+    const id = String(ex.id), prev = _exSnap[id], now_ = cur[id];
+    // 項目ごとの時刻をまだ持たない種目は、今までの項目すべてに種目の updatedAt を付けてから始める
+    const fa = ex.fieldAt ? Object.assign({}, ex.fieldAt)
+      : (ex.updatedAt ? Object.fromEntries(Object.keys(now_).map(k => [k, ex.updatedAt])) : {});
+    let changed = false;
+    new Set([...Object.keys(prev || {}), ...Object.keys(now_)]).forEach(k => {
+      if (!prev || prev[k] !== now_[k]) { fa[k] = now; changed = true; }
+    });
+    if (changed) { ex.updatedAt = now; ex.fieldAt = fa; }
+  });
   const tomb = DB.get('exTombstones_v1', {});
   let tombChanged = false;
   Object.keys(_exSnap).forEach(id => { if (!(id in cur)) { tomb[id] = now; tombChanged = true; } });

@@ -353,6 +353,30 @@ function _remoteStateDoc(doc) {
   return { exercises: Array.isArray(doc.exercises) ? doc.exercises : [], exDeleted: doc.exDeleted || {},
            exOrderAt: doc.exOrderAt || 0, settings: doc.settings || null, settingsAt: doc.settingsAt || {} };
 }
+/* 同じ種目が両方にあるときは項目ごとに、あとから変えたほうを採る（同じならサーバー）。
+   項目ごとの時刻（fieldAt）が無い古いデータは、種目の updatedAt を使う。
+   以前は種目ごと丸ごと採っていたので、スマホで重量・iPad でレスト時間を変えると片方が消えた。 */
+function _mergeExercise(l, r) {
+  const skip = k => k === 'updatedAt' || k === 'fieldAt';
+  const lf = l.fieldAt || {}, rf = r.fieldAt || {};
+  const out = {}, fieldAt = {};
+  new Set([...Object.keys(l), ...Object.keys(r)]).forEach(k => {
+    if (skip(k)) return;
+    // 項目ごとの時刻を持つ種目なら、載っていない項目は「変えていない」（0）。
+    // 持たない古い種目だけ、種目の updatedAt で代用する
+    const tl = lf[k] != null ? lf[k] : (l.fieldAt ? 0 : (l.updatedAt || 0));
+    const tr = rf[k] != null ? rf[k] : (r.fieldAt ? 0 : (r.updatedAt || 0));
+    const useL = (k in l) && (!(k in r) || tl > tr);
+    out[k] = useL ? l[k] : r[k];
+    const t = Math.max(tl, tr);
+    if (t) fieldAt[k] = t;
+  });
+  const up = Math.max(l.updatedAt || 0, r.updatedAt || 0);
+  if (up) out.updatedAt = up;
+  if (Object.keys(fieldAt).length) out.fieldAt = fieldAt;
+  return out;
+}
+
 function _mergeStateDocs(a, b) {   // a = この端末、b = サーバー
   const tomb = Object.assign({}, b.exDeleted);
   Object.entries(a.exDeleted || {}).forEach(([id, t]) => { if (!(tomb[id] >= t)) tomb[id] = t; });
@@ -361,7 +385,7 @@ function _mergeStateDocs(a, b) {   // a = この端末、b = サーバー
   b.exercises.forEach(ex => byId.set(String(ex.id), ex));
   a.exercises.forEach(ex => {
     const id = String(ex.id), cur = byId.get(id);
-    if (!cur || (ex.updatedAt || 0) > (cur.updatedAt || 0)) byId.set(id, ex);
+    byId.set(id, cur ? _mergeExercise(ex, cur) : ex);
   });
   for (const [id, ex] of [...byId]) {
     if (tomb[id] != null && tomb[id] >= (ex.updatedAt || 0)) byId.delete(id);
