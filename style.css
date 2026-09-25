@@ -1759,3 +1759,34 @@ button {
   margin-bottom: 4px;
 }
 .box-lost .box-item { margin-bottom: 8px; }
+
+/* 種目名は省略せずに折り返して全部見せる。
+   以前は1行に収めて … で切っていたため、スマホ幅では右のボタンに場所を取られ、
+   長い種目名の後半が読めなかった（2026-09-25） */
+.ex-name,
+.box-item-name {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+/* 種目カードの見出しは2段組み。
+   1段目：種目名をカードの幅いっぱいに（長くても2行ほどで収まる）
+   2段目：左に重量・ゲージ、右にボタン
+   名前とボタンを横に並べていた頃は、名前の欄が140px（並び替え中は87px）しかなく、
+   長い種目名が4〜6行に細切れになっていた */
+.ex-card-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "name   name"
+    "bottom actions";
+  align-items: center;
+  row-gap: 2px;
+}
+.ex-card-header .ex-info { display: contents; }
+.ex-card-header .ex-name { grid-area: name; }
+.ex-card-header .ex-header-bottom { grid-area: bottom; margin-top: 0; min-width: 0; flex-wrap: wrap; }
+.ex-card-header .ex-card-actions { grid-area: actions; flex: none; }
+.gauge-wrap { flex-wrap: wrap; }
