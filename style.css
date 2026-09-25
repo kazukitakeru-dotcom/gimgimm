@@ -1790,3 +1790,16 @@ button {
 .ex-card-header .ex-header-bottom { grid-area: bottom; margin-top: 0; min-width: 0; flex-wrap: wrap; }
 .ex-card-header .ex-card-actions { grid-area: actions; flex: none; }
 .gauge-wrap { flex-wrap: wrap; }
+
+/* 補欠ボックスの種目も2段組み（1段目に名前を全幅、2段目に説明とボタン）。
+   名前の横にボタンを並べると欄が狭く、長い名前が小さな文字の2行になっていた */
+.box-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  column-gap: 4px;
+  row-gap: 2px;
+}
+.box-item .box-item-info { display: contents; }
+.box-item .box-item-name { grid-column: 1 / -1; }
+.box-item .box-item-sub  { grid-column: 1; }

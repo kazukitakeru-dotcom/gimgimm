@@ -445,6 +445,27 @@ function renderGauge(count, target) {
 // ================================================================
 //  RENDER ENGINE
 // ================================================================
+// 長い種目名は、1行に入りきるまで文字を少しずつ小さくする。
+// 読みにくくならないよう元の大きさの7割で止め、それでも入らなければ2行に折り返す。
+function fitNames(root) {
+  (root || document).querySelectorAll('.ex-name, .box-item-name').forEach(el => {
+    el.style.fontSize = '';
+    if (!el.getClientRects().length) return;
+    const base = parseFloat(getComputedStyle(el).fontSize);
+    const min  = Math.max(11, Math.round(base * 0.7));
+    // 高さだけでなく横のはみ出しも見る。行末の「）」などは行頭に来られない（禁則）ため、
+    // 折り返さずに欄の外へはみ出すことがある
+    const oneLine = () => el.getBoundingClientRect().height <= parseFloat(getComputedStyle(el).lineHeight) * 1.3
+                        && el.scrollWidth <= el.clientWidth + 1;
+    for (let size = base; !oneLine() && size > min; ) {
+      size -= 0.5;
+      el.style.fontSize = size + 'px';
+    }
+  });
+}
+let _fitTimer = null;
+window.addEventListener('resize', () => { clearTimeout(_fitTimer); _fitTimer = setTimeout(() => fitNames(document), 150); });
+
 function render() {
   document.getElementById('app').innerHTML = `
     ${renderHeader()}
@@ -460,6 +481,7 @@ function render() {
   bindEvents();
   // sync.js が読み込まれていれば同期カードを差し込んでもらう
   try { if (window.onIronLogRender) window.onIronLogRender(); } catch {}
+  fitNames(document);
 }
 
 // ── Header ──────────────────────────────────────────────────────
@@ -683,6 +705,7 @@ function openBoxModal() {
           <button class="btn-confirm" data-box-close="1">閉じる</button>
         </div>
       </div>`;
+    fitNames(overlay);
   }
   paint();
 
@@ -1949,6 +1972,7 @@ function renderExList() {
       btnSave.parentNode.insertBefore(div.firstElementChild, btnSave);
     }
   }
+  fitNames(list);
 }
 
 // ── Save log ─────────────────────────────────────────────────────
