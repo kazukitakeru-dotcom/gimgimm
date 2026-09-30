@@ -18,6 +18,10 @@
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+/* ボタンを続けて押すと iPhone がダブルタップと受け取って画面を拡大していた。
+   manipulation はダブルタップ拡大だけを止める（スクロールと2本指での拡大はそのまま使える）。
+   touch-action は子に引き継がれないので全要素に当てる */
+*, *::before, *::after { touch-action: manipulation; }
 
 html {
   height: 100%;
