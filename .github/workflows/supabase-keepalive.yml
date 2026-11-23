@@ -11,6 +11,8 @@
 #
 # 注意: 公開リポジトリの定期実行は、リポジトリに60日間コミットが無いと
 # GitHub が自動で無効にする（その前に通知メールが来る）。
+# これを避けるため、最後のコミットから45日経ったら .github/keepalive.txt を
+# 更新してコミットする（コミットが増えるのは45日に1回だけ）。
 # ============================================================================
 name: Supabase keepalive
 
@@ -18,6 +20,9 @@ on:
   schedule:
     - cron: '23 18 * * *'   # 毎日 03:23（日本時間）
   workflow_dispatch:         # Actions の画面から手動でも実行できる
+
+permissions:
+  contents: write
 
 jobs:
   ping:
@@ -57,3 +62,30 @@ jobs:
           done
 
           exit $fail
+
+  # 60日ルールで定期実行が止まらないよう、リポジトリに活動を残す。
+  # 同期サーバーの確認が失敗しても、こちらは独立して動く。
+  stay-active:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: リポジトリを取得
+        uses: actions/checkout@v4
+
+      - name: 最後のコミットから45日経っていたら記録を更新する
+        run: |
+          set -eu
+          last=$(git log -1 --format=%ct)
+          now=$(date +%s)
+          days=$(( (now - last) / 86400 ))
+          echo "最後のコミットから ${days} 日"
+          if [ "$days" -lt 45 ]; then
+            echo "まだ更新不要です。"
+            exit 0
+          fi
+          TZ=Asia/Tokyo date +'%Y-%m-%d %H:%M JST' > .github/keepalive.txt
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/keepalive.txt
+          git commit -m "chore: 定期実行を止めないための記録を更新"
+          git push
